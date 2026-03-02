@@ -2,6 +2,10 @@
 
 Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
+> **选哪个项目？**
+> - **本项目**（`kirocli-bot-gateway`）：多平台支持（飞书 + Discord + 更多）。如果需要多平台或未来可能扩展，推荐用这个。
+> - [`feishu-kirocli-bot`](https://github.com/terrificdm/feishu-kirocli-bot)：仅支持飞书，轻量简单。如果只用飞书可以选这个。
+
 ## 支持的平台
 
 | 平台 | 状态 | 说明 |
@@ -173,6 +177,8 @@ cp .env.example .env
 7. 发布应用：在**版本管理与发布**中，创建版本并发布
    - 企业自建应用通常自动审批
    - 权限变更需要发布新版本才能生效
+
+> ⚠️ **外部群限制**：受限于飞书自身的管控，默认情况下，群聊模式的应用机器人**只能**添加到飞书企业内部群，更多情况请参考飞书文档。
 
 ### Discord
 

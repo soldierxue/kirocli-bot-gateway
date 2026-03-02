@@ -4,6 +4,10 @@
 
 Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
+> **Which repo to use?**
+> - **This repo** (`kirocli-bot-gateway`): Multi-platform (Feishu + Discord + more). Recommended if you need multiple platforms or plan to expand later.
+> - [`feishu-kirocli-bot`](https://github.com/terrificdm/feishu-kirocli-bot): Feishu only, lightweight and simple. Use this if you only need Feishu.
+
 ## Supported Platforms
 
 | Platform | Status | Description |
@@ -175,6 +179,8 @@ See `.env.example` for detailed configuration options and explanations.
 7. Publish the app: In **Version Management & Release**, create a version and publish
    - Enterprise self-built apps are usually auto-approved
    - Permission changes require publishing a new version to take effect
+
+> ⚠️ **External Group Limitation**: Due to Feishu's access control, the bot can **only** be added to internal enterprise groups by default. For external groups, see Feishu documentation.
 
 ### Discord
 
