@@ -65,6 +65,9 @@ class ACPClient:
         self._session_models: dict[str, dict] = {}
         # session_id -> available commands (from _kiro.dev/commands/available)
         self._session_commands: dict[str, list] = {}
+        # Stream callbacks: session_id -> callable(chunk_text: str, accumulated_text: str)
+        self._stream_callbacks: dict[str, Callable] = {}
+        self._stream_accum: dict[str, list[str]] = {}
         self._running = False
 
     def on_permission_request(self, handler: PermissionHandler):
@@ -264,7 +267,7 @@ class ACPClient:
         """Get available commands for a session (from _kiro.dev/commands/available notification)."""
         return self._session_commands.get(session_id, [])
 
-    def session_prompt(self, session_id: str, text: str, images: list[tuple[str, str]] | None = None, timeout: float = 300) -> PromptResult:
+    def session_prompt(self, session_id: str, text: str, images: list[tuple[str, str]] | None = None, timeout: float = 300, on_stream: Callable[[str, str], None] | None = None) -> PromptResult:
         """Send a prompt and collect the full response (blocking).
         
         Args:
@@ -272,9 +275,15 @@ class ACPClient:
             text: Text content
             images: List of (base64_data, mime_type) tuples
             timeout: Timeout in seconds
+            on_stream: Optional callback(chunk_text, accumulated_text) called on each text chunk
         """
         # Prepare collection state for this session
         self._session_updates[session_id] = []
+        
+        # Register stream callback if provided
+        if on_stream:
+            self._stream_callbacks[session_id] = on_stream
+            self._stream_accum[session_id] = []
 
         # Track active prompt for cancellation
         req_id = self._next_id()
@@ -317,6 +326,8 @@ class ACPClient:
             return self._build_prompt_result(session_id, result)
         finally:
             self._active_prompts.pop(session_id, None)
+            self._stream_callbacks.pop(session_id, None)
+            self._stream_accum.pop(session_id, None)
 
     def session_cancel(self, session_id: str):
         """Cancel the current operation for a session."""
@@ -434,9 +445,24 @@ class ACPClient:
             session_id = params.get("sessionId", "")
 
             if method == "session/update" and session_id:
+                update = params.get("update", {})
                 updates = self._session_updates.get(session_id)
                 if updates is not None:
-                    updates.append(params.get("update", {}))
+                    updates.append(update)
+                
+                # Stream callback for text chunks
+                if update.get("sessionUpdate") == "agent_message_chunk":
+                    content = update.get("content", {})
+                    if isinstance(content, dict) and content.get("type") == "text":
+                        chunk_text = content.get("text", "")
+                        cb = self._stream_callbacks.get(session_id)
+                        accum = self._stream_accum.get(session_id)
+                        if cb and accum is not None and chunk_text:
+                            accum.append(chunk_text)
+                            try:
+                                cb(chunk_text, "".join(accum))
+                            except Exception as e:
+                                log.debug("[ACP] Stream callback error: %s", e)
             
             elif method == "_kiro.dev/commands/available":
                 # Store available commands for this session

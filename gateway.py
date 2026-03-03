@@ -102,6 +102,9 @@ class Gateway:
         self._pending_permissions: dict[str, tuple[threading.Event, list]] = {}
         self._pending_permissions_lock = threading.Lock()
         
+        # Active card handles: "platform:chat_id" -> CardHandle (for permission UI reuse)
+        self._active_cards: dict[str, CardHandle] = {}
+        
         # session_id -> "platform:chat_id" mapping
         self._session_to_key: dict[str, str] = {}
         
@@ -309,7 +312,12 @@ class Gateway:
         msg += "Reply: **y**(allow) / **n**(deny) / **t**(trust)\n"
         msg += f"⏱️ Auto-deny in {_PERMISSION_TIMEOUT}s"
 
-        self._send_text(platform, chat_id, msg)
+        # Prefer updating the active card (Feishu) over sending a new message (Discord)
+        card = self._active_cards.get(key)
+        if card:
+            self._update_card(platform, card, msg)
+        else:
+            self._send_text(platform, chat_id, msg)
         log.info("[Gateway] [%s] Sent permission request: %s", platform, request.title)
 
         evt = threading.Event()
@@ -323,9 +331,18 @@ class Gateway:
                 if result_holder:
                     decision = result_holder[0]
                     log.info("[Gateway] [%s] User decision: %s", platform, decision)
+                    # Send new card below user's reply for the result
+                    if card:
+                        new_card = self._send_card(platform, chat_id, "🤔 Processing...")
+                        if new_card:
+                            self._active_cards[key] = new_card
                     return decision
             
-            self._send_text(platform, chat_id, "⏱️ Timeout, auto-denied")
+            # Timeout
+            if card:
+                self._update_card(platform, card, "⏱️ Timeout, auto-denied")
+            else:
+                self._send_text(platform, chat_id, "⏱️ Timeout, auto-denied")
             log.warning("[Gateway] [%s] Permission timed out: %s", platform, request.title)
             return "deny"
         finally:
@@ -501,11 +518,11 @@ class Gateway:
 
 **Agent:**
 • /agent - List available agents
-• /agent <agent_name> - Switch agent
+• /agent agent_name - Switch agent
 
 **Model:**
 • /model - List available models
-• /model <model_name> - Switch model
+• /model model_name - Switch model
 
 **Other:**
 • /help - Show this help"""
@@ -538,7 +555,7 @@ class Gateway:
                 lines.append(f"{marker} **{mode_name}**")
             
             lines.append("")
-            lines.append("💡 Use /agent <agent_name> to switch")
+            lines.append("💡 Use /agent agent_name to switch")
             return "\n".join(lines)
         else:
             # Switch agent
@@ -597,7 +614,7 @@ class Gateway:
             lines.append("")
             if current_model:
                 lines.append(f"**Current:** {current_model}")
-            lines.append("💡 Use /model <model_name> to switch")
+            lines.append("💡 Use /model model_name to switch")
             return "\n".join(lines)
         else:
             # Switch model
@@ -663,8 +680,36 @@ class Gateway:
         card_handle = None
         adapter = self._adapter_map.get(platform)
         
+        # Streaming state
+        _stream_lock = threading.Lock()
+        _last_stream_update = [0.0]
+        _STREAM_INTERVAL = 1.5  # seconds between card updates (Feishu rate limit safe)
+        
+        def _on_stream(chunk: str, accumulated: str):
+            """Called from ACP read thread on each text chunk."""
+            # Use _active_cards to get the current card (may change after permission approval)
+            current_card = self._active_cards.get(key)
+            if not current_card:
+                return
+            now = time.time()
+            with _stream_lock:
+                elapsed = now - _last_stream_update[0]
+                if elapsed >= _STREAM_INTERVAL:
+                    _last_stream_update[0] = now
+                else:
+                    return
+            # Update card outside lock
+            try:
+                self._update_card(platform, current_card, accumulated + " ▌")
+            except Exception as e:
+                log.debug("[Gateway] [%s] Stream update error: %s", key, e)
+        
         try:
             card_handle = self._send_card(platform, chat_id, "🤔 Thinking...")
+            
+            # Store card handle for permission UI reuse
+            if card_handle:
+                self._active_cards[key] = card_handle
             
             # Start typing loop for platforms that don't use card updates (e.g., Discord)
             # Discord's send_card already sends one typing indicator, the loop continues it
@@ -685,12 +730,13 @@ class Gateway:
             session_id = self._get_or_create_session(platform, chat_id, key, acp)
             self._session_to_key[session_id] = key
 
-            # Send to Kiro
+            # Send to Kiro (with streaming for card-based platforms)
+            stream_cb = _on_stream if card_handle else None
             max_retries = 3
             last_error: Exception | None = None
             for attempt in range(max_retries):
                 try:
-                    result = acp.session_prompt(session_id, text, images=images)
+                    result = acp.session_prompt(session_id, text, images=images, on_stream=stream_cb)
                     break
                 except RuntimeError as e:
                     last_error = e
@@ -709,8 +755,9 @@ class Gateway:
                 self._last_activity[platform] = time.time()
 
             response = format_response(result)
-            if card_handle:
-                self._update_card(platform, card_handle, response)
+            final_card = self._active_cards.get(key) or card_handle
+            if final_card:
+                self._update_card(platform, final_card, response)
             else:
                 self._send_text(platform, chat_id, response)
 
@@ -722,8 +769,9 @@ class Gateway:
             else:
                 error_text = f"❌ Error: {e}"
             
-            if card_handle:
-                self._update_card(platform, card_handle, error_text)
+            error_card = self._active_cards.get(key) or card_handle
+            if error_card:
+                self._update_card(platform, error_card, error_text)
             else:
                 self._send_text(platform, chat_id, error_text)
             
@@ -739,6 +787,8 @@ class Gateway:
                     self._last_activity.pop(platform, None)
         
         finally:
+            # Clean up active card reference
+            self._active_cards.pop(key, None)
             # Always stop typing loop when done
             if adapter and not card_handle:
                 adapter.stop_typing_loop(chat_id)
