@@ -63,12 +63,13 @@ class ChatAdapter(ABC):
         pass
 
     @abstractmethod
-    def send_text(self, chat_id: str, text: str) -> str | None:
+    def send_text(self, chat_id: str, text: str, reply_to: str = "") -> str | None:
         """Send a plain text message.
         
         Args:
             chat_id: Target chat identifier
             text: Message text
+            reply_to: Optional message ID to reply to
             
         Returns:
             Message ID if available, None otherwise
@@ -76,13 +77,14 @@ class ChatAdapter(ABC):
         pass
 
     @abstractmethod
-    def send_card(self, chat_id: str, content: str, title: str = "") -> CardHandle | None:
+    def send_card(self, chat_id: str, content: str, title: str = "", reply_to: str = "") -> CardHandle | None:
         """Send a rich card/embed message that can be updated later.
         
         Args:
             chat_id: Target chat identifier
             content: Card content (markdown or platform-specific format)
             title: Optional card title
+            reply_to: Optional message ID to reply to
             
         Returns:
             CardHandle for updating the card, None if failed

@@ -13,6 +13,8 @@ from lark_oapi.api.im.v1 import (
     GetMessageResourceRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
     P2ImMessageReceiveV1,
 )
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
@@ -69,24 +71,38 @@ class FeishuAdapter(ChatAdapter):
         # Note: lark_oapi WebSocket client doesn't have a clean stop method
         log.info("[Feishu] Adapter stopped")
 
-    def send_text(self, chat_id: str, text: str) -> str | None:
+    def send_text(self, chat_id: str, text: str, reply_to: str = "") -> str | None:
         """Send a text message using card format for better markdown support."""
         handle = self.send_card(chat_id, text)
         return handle.message_id if handle else None
 
-    def send_card(self, chat_id: str, content: str, title: str = "") -> CardHandle | None:
-        """Send an interactive card message."""
+    def send_card(self, chat_id: str, content: str, title: str = "", reply_to: str = "") -> CardHandle | None:
+        """Send an interactive card message. If reply_to is set, send as reply to that message."""
         card = self._build_card(content, title)
-        body = CreateMessageRequestBody.builder() \
-            .receive_id(chat_id) \
-            .msg_type("interactive") \
-            .content(json.dumps(card, ensure_ascii=False)) \
-            .build()
-        req = CreateMessageRequest.builder() \
-            .receive_id_type("chat_id") \
-            .request_body(body) \
-            .build()
-        resp = self._client.im.v1.message.create(req)
+        card_json = json.dumps(card, ensure_ascii=False)
+
+        if reply_to:
+            # Use reply API for group chat replies
+            body = ReplyMessageRequestBody.builder() \
+                .msg_type("interactive") \
+                .content(card_json) \
+                .build()
+            req = ReplyMessageRequest.builder() \
+                .message_id(reply_to) \
+                .request_body(body) \
+                .build()
+            resp = self._client.im.v1.message.reply(req)
+        else:
+            body = CreateMessageRequestBody.builder() \
+                .receive_id(chat_id) \
+                .msg_type("interactive") \
+                .content(card_json) \
+                .build()
+            req = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(body) \
+                .build()
+            resp = self._client.im.v1.message.create(req)
         
         if not resp.success():
             log.error("[Feishu] Send card failed: code=%s msg=%s", resp.code, resp.msg)

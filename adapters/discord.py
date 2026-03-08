@@ -207,7 +207,7 @@ class DiscordAdapter(ChatAdapter):
         
         return chunks
 
-    def send_text(self, chat_id: str, text: str) -> str | None:
+    def send_text(self, chat_id: str, text: str, reply_to: str = "") -> str | None:
         """Send a plain text message, splitting into chunks if needed."""
         async def _send():
             channel = self._client.get_channel(int(chat_id))
@@ -218,12 +218,22 @@ class DiscordAdapter(ChatAdapter):
                     log.error("[Discord] Channel not found: %s", chat_id)
                     return None
             
+            # Resolve reply reference for group chats
+            reference = None
+            if reply_to:
+                try:
+                    reference = discord.MessageReference(message_id=int(reply_to), channel_id=int(chat_id))
+                except (ValueError, TypeError):
+                    pass
+            
             chunks = self._split_text(text, TEXT_CHUNK_LIMIT)
             last_msg_id = None
             
             for i, chunk in enumerate(chunks):
                 try:
-                    msg = await self._send_with_retry(channel.send, chunk)
+                    # Only reply to first chunk
+                    ref = reference if i == 0 else None
+                    msg = await self._send_with_retry(channel.send, chunk, reference=ref)
                     last_msg_id = str(msg.id)
                     if len(chunks) > 1:
                         log.debug("[Discord] Sent chunk %d/%d", i + 1, len(chunks))
@@ -262,7 +272,7 @@ class DiscordAdapter(ChatAdapter):
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(_send(), self._loop)
 
-    def send_card(self, chat_id: str, content: str, title: str = "") -> CardHandle | None:
+    def send_card(self, chat_id: str, content: str, title: str = "", reply_to: str = "") -> CardHandle | None:
         """Discord doesn't use updatable card embeds for responses.
         
         Returns None to trigger Gateway fallback to send_text().

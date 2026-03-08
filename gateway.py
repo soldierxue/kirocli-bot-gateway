@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from adapters.base import ChatAdapter, IncomingMessage, CardHandle
+from adapters.base import ChatAdapter, ChatType, IncomingMessage, CardHandle
 from acp_client import ACPClient, PromptResult, PermissionRequest
 from config import Config
 
@@ -98,6 +98,8 @@ class Gateway:
         # Pending messages for debounce + collect: key -> [(text, images)]
         self._pending_messages: dict[str, list[tuple[str, list | None]]] = {}
         self._pending_lock = threading.Lock()
+        # Reply target: key -> message_id (for group chat reply, feishu only)
+        self._reply_targets: dict[str, str] = {}
         self._debounce_timers: dict[str, threading.Timer] = {}
         self._DEBOUNCE_BY_PLATFORM = {
             "discord": config.debounce_discord,
@@ -281,11 +283,11 @@ class Gateway:
         """Get adapter by platform name."""
         return self._adapter_map.get(platform)
 
-    def _send_text(self, platform: str, chat_id: str, text: str):
+    def _send_text(self, platform: str, chat_id: str, text: str, reply_to: str = ""):
         """Send text message via appropriate adapter."""
         adapter = self._get_adapter(platform)
         if adapter:
-            adapter.send_text(chat_id, text)
+            adapter.send_text(chat_id, text, reply_to=reply_to)
 
     def _send_text_nowait(self, platform: str, chat_id: str, text: str):
         """Send text message without blocking (for command responses).
@@ -299,11 +301,11 @@ class Gateway:
             else:
                 adapter.send_text(chat_id, text)
 
-    def _send_card(self, platform: str, chat_id: str, content: str, title: str = "") -> CardHandle | None:
+    def _send_card(self, platform: str, chat_id: str, content: str, title: str = "", reply_to: str = "") -> CardHandle | None:
         """Send card via appropriate adapter."""
         adapter = self._get_adapter(platform)
         if adapter:
-            return adapter.send_card(chat_id, content, title)
+            return adapter.send_card(chat_id, content, title, reply_to=reply_to)
         return None
 
     def _update_card(self, platform: str, handle: CardHandle, content: str, title: str = "") -> bool:
@@ -417,6 +419,11 @@ class Gateway:
             return
 
         # Store in pending buffer for debounce + collect
+        # Save last message_id for group chat reply (feishu + discord)
+        if msg.chat_type == ChatType.GROUP:
+            raw_msg_id = msg.raw.get("message_id", "")
+            if raw_msg_id:
+                self._reply_targets[key] = raw_msg_id
         with self._pending_lock:
             if key not in self._pending_messages:
                 self._pending_messages[key] = []
@@ -796,7 +803,11 @@ class Gateway:
                 log.debug("[Gateway] [%s] Stream update error: %s", key, e)
         
         try:
-            card_handle = self._send_card(platform, chat_id, "🤔 Thinking...")
+            reply_to = self._reply_targets.pop(key, "")
+            card_handle = self._send_card(platform, chat_id, "🤔 Thinking...", reply_to=reply_to)
+            # Keep reply_to for platforms where send_card returns None (e.g., Discord)
+            if not card_handle and reply_to:
+                self._reply_targets[key] = reply_to
             
             # Store card handle for permission UI reuse
             if card_handle:
@@ -850,7 +861,8 @@ class Gateway:
             if final_card:
                 self._update_card(platform, final_card, response)
             else:
-                self._send_text(platform, chat_id, response)
+                final_reply_to = self._reply_targets.pop(key, "")
+                self._send_text(platform, chat_id, response, reply_to=final_reply_to)
 
         except Exception as e:
             log.exception("[Gateway] [%s] Error: %s", platform, e)
