@@ -755,6 +755,10 @@ class Gateway:
         }
 
         for i, (b64_data, mime_type) in enumerate(images):
+            # Detect real MIME for correct file extension
+            detected = ACPClient._detect_image_mime(b64_data)
+            if detected:
+                mime_type = detected
             ext = ext_map.get(mime_type, "jpg")
             filename = f"{ts}_{i}.{ext}"
             filepath = os.path.join(images_dir, filename)
