@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from adapters.base import ChatAdapter, ChatType, IncomingMessage, CardHandle
 from acp_client import ACPClient, PromptResult, PermissionRequest
 from config import Config
+from context import ContextBuilder
+from memory import MemoryStore
 from session_map import SessionMap
 
 log = logging.getLogger(__name__)
@@ -131,6 +133,11 @@ class Gateway:
         self._session_map = SessionMap(
             path=os.path.join(config.kiro.gateway_state_dir, "session_map.json")
         )
+        
+        # Memory system: persistent user knowledge across all sessions
+        self._memory = MemoryStore(base_dir=config.kiro.gateway_state_dir)
+        self._memory.init()
+        self._ctx_builder = ContextBuilder(memory=self._memory, config=config)
         
         # Idle checker
         self._idle_checker_stop = threading.Event()
@@ -561,6 +568,12 @@ class Gateway:
             self._handle_agent_command(platform, chat_id, key, arg)
         elif cmd == "/model":
             self._handle_model_command(platform, chat_id, key, arg)
+        elif cmd == "/remember":
+            self._handle_remember_command(platform, chat_id, arg)
+        elif cmd == "/forget":
+            self._handle_forget_command(platform, chat_id, arg)
+        elif cmd == "/memory":
+            self._handle_memory_command(platform, chat_id)
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
@@ -589,6 +602,38 @@ class Gateway:
     def _handle_help_command(self, platform: str, chat_id: str):
         """Show help."""
         self._send_text_nowait(platform, chat_id, self._get_help_text())
+
+    def _handle_remember_command(self, platform: str, chat_id: str, arg: str):
+        """Handle /remember <text> — save a lesson to persistent memory."""
+        if not arg:
+            self._send_text_nowait(platform, chat_id,
+                                   "💡 Usage: /remember <something to remember>\n"
+                                   "Example: /remember I prefer pytest-asyncio strict mode")
+            return
+        self._memory.add_lesson(arg)
+        self._send_text_nowait(platform, chat_id, f"✅ Remembered: {arg}")
+
+    def _handle_forget_command(self, platform: str, chat_id: str, arg: str):
+        """Handle /forget <keyword> — remove matching lessons from memory."""
+        if not arg:
+            self._send_text_nowait(platform, chat_id,
+                                   "💡 Usage: /forget <keyword>\n"
+                                   "Removes all lessons containing the keyword")
+            return
+        if self._memory.remove_lesson(arg):
+            self._send_text_nowait(platform, chat_id, f"✅ Forgot lessons matching: {arg}")
+        else:
+            self._send_text_nowait(platform, chat_id, f"❌ No lessons found matching: {arg}")
+
+    def _handle_memory_command(self, platform: str, chat_id: str):
+        """Handle /memory — show current memory contents."""
+        key = self._make_key(platform, chat_id)
+        ws_id = self._ctx_builder._workspace_id(platform, chat_id)
+        ctx = self._memory.get_context(workspace_id=ws_id)
+        if ctx:
+            self._send_text_nowait(platform, chat_id, f"🧠 **Current Memory** (workspace: {ws_id})\n\n{ctx}")
+        else:
+            self._send_text_nowait(platform, chat_id, "🧠 Memory is empty. Use /remember to add knowledge.")
 
     def _handle_slash_command(self, platform: str, chat_id: str, cmd: str, args: str) -> str | None:
         """Handle slash command from Discord adapter.
@@ -626,6 +671,11 @@ class Gateway:
 **Model:**
 • /model - List available models
 • /model model_name - Switch model
+
+**Memory:**
+• /remember <text> - Save a preference or rule
+• /forget <keyword> - Remove matching memories
+• /memory - Show current memory
 
 **Other:**
 • /help - Show this help"""
@@ -940,6 +990,11 @@ class Gateway:
                 if saved_paths:
                     path_note = ", ".join(saved_paths)
                     text = (text or "") + f"\n\n[Image saved: {path_note}]"
+
+            # Inject memory context on new sessions (preferences, projects, lessons)
+            text = self._ctx_builder.build_message(
+                text, is_new_session=_is_new, platform=platform, chat_id=chat_id
+            )
 
             # Send to Kiro (with streaming for card-based platforms)
             stream_cb = _on_stream if card_handle else None
