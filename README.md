@@ -44,11 +44,13 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
 - **🔌 Multi-Platform**: Single gateway serves multiple chat platforms
 - **🔒 Chat Isolation**: Each chat gets its own Kiro CLI instance for parallel inference
+- **🧠 Persistent Memory**: User preferences, project context, and learned corrections survive across sessions and platforms
+- **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
-- **🔄 LRU Eviction**: Automatic cleanup when instance limit is reached
+- **📊 LRU Eviction**: Automatic cleanup when instance limit is reached
 - **🖼️ Image Support**: Send images for visual analysis (JPEG, PNG, GIF, WebP) with auto MIME detection
 - **🛑 Cancel Operation**: Send "cancel" to interrupt
 - **🔧 MCP & Skills Support**: Global or project-level configuration
@@ -350,6 +352,9 @@ Send images alongside text for Kiro to analyze — screenshots, diagrams, error 
 | `/agent <name>` | Switch to agent |
 | `/model` | List available models |
 | `/model <name>` | Switch to model |
+| `/remember <text>` | Save a preference or rule to persistent memory |
+| `/forget <keyword>` | Remove matching memories |
+| `/memory` | Show current memory contents |
 | `/help` | Show help |
 
 ### Other Commands
@@ -395,16 +400,32 @@ kirocli-bot-gateway/
 ├── gateway.py                     # Core gateway logic
 ├── config.py                      # Configuration management
 ├── acp_client.py                  # ACP protocol client
+├── session_map.py                 # Session resume: chat_key → kiro-cli session ID
+├── memory.py                      # Two-layer persistent memory (prefs/lessons + projects)
+├── context.py                     # Context builder: injects memory into new sessions
 ├── .env.example                   # Environment config template (copy to .env)
 ├── discord_policy.json            # Discord access policy (optional, overrides env vars)
 ├── discord_policy.example.json    # Example Discord policy (copy and edit)
 ├── pyproject.toml                 # Python package config
-├── kiro-gateway.service.example    # systemd service template (copy and edit)
+├── kiro-gateway.service.example   # systemd service template (copy and edit)
 └── adapters/
     ├── __init__.py                # Package exports
     ├── base.py                    # ChatAdapter interface
     ├── feishu.py                  # Feishu implementation
     └── discord.py                 # Discord implementation
+```
+
+### Persistent State (`~/.kirocli-gateway/`)
+
+```
+~/.kirocli-gateway/
+├── session_map.json               # Chat key → kiro-cli session ID mapping
+└── memory/
+    ├── preferences.md             # Global user preferences
+    ├── lessons.md                 # Global learned corrections
+    └── workspaces/
+        ├── _global/projects.md    # Project context (per_chat mode)
+        └── {hash}/projects.md     # Project context (fixed mode, per project dir)
 ```
 
 ## Adding New Platforms

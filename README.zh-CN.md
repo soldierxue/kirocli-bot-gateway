@@ -42,11 +42,13 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
 - **🔌 多平台支持**：一个网关服务多个聊天平台
 - **🔒 聊天隔离**：每个聊天独立的 Kiro CLI 实例，并行推理
+- **🧠 持久记忆**：用户偏好、项目上下文和纠正规则跨会话、跨平台保留
+- **🔄 会话恢复**：空闲超时、崩溃或网关重启后自动恢复对话历史
 - **📁 灵活的工作空间模式**：`per_chat`（用户隔离）或 `fixed`（共享项目）
 - **🔐 交互式权限审批**：敏感操作需用户确认（y/n/t）
 - **⚡ 按需启动**：仅在收到消息时启动 Kiro CLI
 - **⏱️ 空闲自动关闭**：可配置的空闲超时
-- **🔄 LRU 驱逐**：达到实例上限时自动回收最久未使用的实例
+- **📊 LRU 驱逐**：达到实例上限时自动回收最久未使用的实例
 - **🖼️ 图片支持**：发送图片进行视觉分析（JPEG、PNG、GIF、WebP），自动检测真实格式
 - **🛑 取消操作**：发送 "cancel" 中断当前操作
 - **🔧 MCP 和 Skills 支持**：全局或项目级配置
@@ -348,6 +350,9 @@ journalctl -u kiro-gateway -f
 | `/agent <名称>` | 切换 Agent |
 | `/model` | 列出可用的模型 |
 | `/model <名称>` | 切换模型 |
+| `/remember <文本>` | 保存偏好或规则到持久记忆 |
+| `/forget <关键词>` | 删除匹配的记忆 |
+| `/memory` | 显示当前记忆内容 |
 | `/help` | 显示帮助 |
 
 ### 其他命令
@@ -393,16 +398,32 @@ kirocli-bot-gateway/
 ├── gateway.py                     # 核心网关逻辑
 ├── config.py                      # 配置管理
 ├── acp_client.py                  # ACP 协议客户端
+├── session_map.py                 # 会话恢复：chat_key → kiro-cli session ID
+├── memory.py                      # 两层持久记忆（偏好/教训 + 项目上下文）
+├── context.py                     # 上下文构建器：新会话注入记忆
 ├── .env.example                   # 环境配置模板（复制为 .env）
 ├── discord_policy.json            # Discord 访问策略（可选，覆盖环境变量）
 ├── discord_policy.example.json    # Discord 策略示例（复制后编辑）
 ├── pyproject.toml                 # Python 包配置
-├── kiro-gateway.service.example    # systemd 服务模板（复制后编辑）
+├── kiro-gateway.service.example   # systemd 服务模板（复制后编辑）
 └── adapters/
     ├── __init__.py                # 包导出
     ├── base.py                    # ChatAdapter 接口
     ├── feishu.py                  # 飞书实现
     └── discord.py                 # Discord 实现
+```
+
+### 持久化状态（`~/.kirocli-gateway/`）
+
+```
+~/.kirocli-gateway/
+├── session_map.json               # 聊天 key → kiro-cli session ID 映射
+└── memory/
+    ├── preferences.md             # 全局用户偏好
+    ├── lessons.md                 # 全局教训
+    └── workspaces/
+        ├── _global/projects.md    # 项目上下文（per_chat 模式）
+        └── {hash}/projects.md     # 项目上下文（fixed 模式，按项目目录隔离）
 ```
 
 ## 添加新平台
