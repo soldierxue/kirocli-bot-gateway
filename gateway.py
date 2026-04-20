@@ -67,10 +67,15 @@ class ChatContext:
 class Gateway:
     """Platform-agnostic gateway between chat adapters and Kiro CLI.
     
-    Each platform gets its own Kiro CLI instance for:
+    Each chat gets its own Kiro CLI instance for:
+    - Parallel inference across different chats
     - Fault isolation (one crash doesn't affect others)
-    - Independent idle timeout
-    - Platform-specific working directories
+    - Independent idle timeout per chat
+    
+    Resource control:
+    - max_instances: LRU eviction when exceeded
+    - cold_start_limit: limits concurrent kiro-cli startups
+    - idle_timeout: auto-stop inactive instances
     
     workspace_mode affects session working directories:
     - fixed: all sessions share the same directory
@@ -82,11 +87,12 @@ class Gateway:
         self._adapters = adapters
         self._adapter_map: dict[str, ChatAdapter] = {a.platform_name: a for a in adapters}
         
-        # Per-platform ACP clients: platform -> ACPClient
+        # Per-chat ACP clients: "platform:chat_id" -> ACPClient
         self._acp_clients: dict[str, ACPClient] = {}
         self._acp_lock = threading.Lock()
+        self._start_sem = threading.Semaphore(config.kiro.cold_start_limit)
         
-        # Per-platform last activity time: platform -> timestamp
+        # Per-chat last activity time: "platform:chat_id" -> timestamp
         self._last_activity: dict[str, float] = {}
         
         # Chat context: "platform:chat_id" -> ChatContext
@@ -130,8 +136,8 @@ class Gateway:
 
     def start(self):
         """Start the gateway and all adapters."""
-        log.info("[Gateway] Starting with per-platform Kiro CLI instances (workspace_mode=%s)", 
-                 self._config.kiro.workspace_mode)
+        log.info("[Gateway] Starting with per-chat Kiro CLI instances (workspace_mode=%s, max=%d)", 
+                 self._config.kiro.workspace_mode, self._config.kiro.max_instances)
 
         # Start idle checker
         self._idle_checker_stop.clear()
@@ -181,107 +187,147 @@ class Gateway:
         log.info("[Gateway] Starting %s adapter (blocking)...", last_adapter.platform_name)
         last_adapter.start(self._on_message)
 
-    def _start_acp(self, platform: str) -> ACPClient:
-        """Start ACP client for a specific platform if not running."""
+    def _start_acp(self, platform: str, chat_id: str) -> ACPClient:
+        """Start ACP client for a specific chat if not running.
+        
+        Limits concurrent cold starts via _start_sem.
+        Evicts LRU instance if max_instances is reached.
+        """
+        key = self._make_key(platform, chat_id)
+
+        # Fast path: already running
         with self._acp_lock:
-            if platform in self._acp_clients and self._acp_clients[platform].is_running():
-                return self._acp_clients[platform]
-            
-            log.info("[Gateway] [%s] Starting kiro-cli...", platform)
+            acp = self._acp_clients.get(key)
+            if acp and acp.is_running():
+                self._last_activity[key] = time.time()
+                return acp
+            # Clean up dead process reference
+            if acp and not acp.is_running():
+                self._acp_clients.pop(key, None)
+                self._last_activity.pop(key, None)
+
+        # Slow path: cold start (outside lock to avoid blocking other chats)
+        self._start_sem.acquire()
+        try:
+            # Double-check after acquiring semaphore
+            with self._acp_lock:
+                acp = self._acp_clients.get(key)
+                if acp and acp.is_running():
+                    self._last_activity[key] = time.time()
+                    return acp
+
+                # LRU eviction if at capacity
+                running = sum(1 for a in self._acp_clients.values() if a.is_running())
+                if running >= self._config.kiro.max_instances and self._last_activity:
+                    oldest_key = min(self._last_activity, key=self._last_activity.get)
+                    log.info("[Gateway] Instance limit (%d) reached, evicting %s",
+                             self._config.kiro.max_instances, oldest_key)
+                    # Evict outside lock below
+                    evict_key = oldest_key
+                else:
+                    evict_key = None
+
+            if evict_key:
+                self._stop_acp_by_key(evict_key)
+
+            log.info("[Gateway] [%s] Starting kiro-cli...", key)
             acp = ACPClient(cli_path=self._config.kiro.path)
-            
+
             # Get cwd based on workspace_mode:
             # - fixed mode: pass platform cwd (loads project-level .kiro/ config)
             # - per_chat mode: pass None (loads global ~/.kiro/ config)
             cwd = self._config.get_kiro_cwd(platform)
             acp.start(cwd=cwd)
-            # Use default argument to capture platform value (avoid closure issue)
             if not self._config.kiro.auto_approve:
                 acp.on_permission_request(lambda req, p=platform: self._handle_permission(req, p))
             else:
-                log.info("[Gateway] [%s] Auto-approve enabled, skipping permission handler", platform)
-            
-            self._acp_clients[platform] = acp
-            self._last_activity[platform] = time.time()
-            
-            # Clear sessions for this platform
-            with self._contexts_lock:
-                keys_to_remove = [k for k in self._contexts if k.startswith(f"{platform}:")]
-                for k in keys_to_remove:
-                    ctx = self._contexts.pop(k, None)
-                    if ctx and ctx.session_id:
-                        self._session_to_key.pop(ctx.session_id, None)
-            
-            mode = self._config.get_workspace_mode(platform)
-            log.info("[Gateway] [%s] kiro-cli started (mode=%s, cwd=%s)", platform, mode, cwd)
-            return acp
+                log.info("[Gateway] [%s] Auto-approve enabled, skipping permission handler", key)
 
-    def _stop_acp(self, platform: str):
-        """Stop ACP client for a specific platform."""
+            with self._acp_lock:
+                self._acp_clients[key] = acp
+                self._last_activity[key] = time.time()
+
+            mode = self._config.get_workspace_mode(platform)
+            log.info("[Gateway] [%s] kiro-cli started (mode=%s, cwd=%s)", key, mode, cwd)
+            return acp
+        finally:
+            self._start_sem.release()
+
+    def _stop_acp_by_key(self, key: str):
+        """Stop ACP client for a specific chat key."""
         with self._acp_lock:
-            acp = self._acp_clients.pop(platform, None)
-            self._last_activity.pop(platform, None)
-            
+            acp = self._acp_clients.pop(key, None)
+            self._last_activity.pop(key, None)
+
         if acp is not None:
-            log.info("[Gateway] [%s] Stopping kiro-cli...", platform)
+            log.info("[Gateway] [%s] Stopping kiro-cli...", key)
             acp.stop()
-            
-            # Clear sessions and clean up images for this platform
+
+            # Clear session context for this chat
             with self._contexts_lock:
-                keys_to_remove = [k for k in self._contexts if k.startswith(f"{platform}:")]
-                for k in keys_to_remove:
-                    ctx = self._contexts.pop(k, None)
-                    if ctx:
-                        if ctx.session_id:
-                            self._session_to_key.pop(ctx.session_id, None)
-                        self._cleanup_images(platform, ctx.chat_id)
-            
-            log.info("[Gateway] [%s] kiro-cli stopped", platform)
+                ctx = self._contexts.pop(key, None)
+                if ctx:
+                    if ctx.session_id:
+                        self._session_to_key.pop(ctx.session_id, None)
+                    platform, chat_id = key.split(":", 1)
+                    self._cleanup_images(platform, chat_id)
+
+            log.info("[Gateway] [%s] kiro-cli stopped", key)
 
     def _stop_all_acp(self):
         """Stop all ACP clients."""
         with self._acp_lock:
-            platforms = list(self._acp_clients.keys())
-        for platform in platforms:
-            self._stop_acp(platform)
+            keys = list(self._acp_clients.keys())
+        for key in keys:
+            self._stop_acp_by_key(key)
 
-    def _ensure_acp(self, platform: str) -> ACPClient:
-        """Ensure ACP client is running for a platform."""
-        acp = self._start_acp(platform)
-        with self._acp_lock:
-            self._last_activity[platform] = time.time()
-        return acp
+    def _ensure_acp(self, platform: str, chat_id: str) -> ACPClient:
+        """Ensure ACP client is running for a chat."""
+        return self._start_acp(platform, chat_id)
 
-    def _get_acp(self, platform: str) -> ACPClient | None:
-        """Get ACP client for a platform if running."""
+    def _get_acp(self, platform: str, chat_id: str = "") -> ACPClient | None:
+        """Get ACP client for a chat if running.
+        
+        When chat_id is provided, looks up the per-chat instance.
+        When chat_id is empty, searches for any running instance for the platform
+        (used by slash commands that don't have chat context yet).
+        """
         with self._acp_lock:
-            acp = self._acp_clients.get(platform)
-            if acp and acp.is_running():
-                return acp
+            if chat_id:
+                key = self._make_key(platform, chat_id)
+                acp = self._acp_clients.get(key)
+                if acp and acp.is_running():
+                    return acp
+            else:
+                # Fallback: find any running instance for this platform
+                for k, acp in self._acp_clients.items():
+                    if k.startswith(f"{platform}:") and acp.is_running():
+                        return acp
         return None
 
     def _idle_checker_loop(self):
-        """Background thread for per-platform idle timeout."""
+        """Background thread for per-chat idle timeout."""
         idle_timeout = self._config.kiro.idle_timeout
         if idle_timeout <= 0:
             log.info("[Gateway] Idle timeout disabled")
             return
         
         while not self._idle_checker_stop.wait(timeout=30):
-            platforms_to_stop = []
+            keys_to_stop = []
             
             with self._acp_lock:
                 now = time.time()
-                for platform, last in self._last_activity.items():
+                for key, last in list(self._last_activity.items()):
                     idle_time = now - last
                     if idle_time > idle_timeout:
-                        if platform in self._acp_clients and self._acp_clients[platform].is_running():
-                            log.info("[Gateway] [%s] Idle timeout (%.0fs)", platform, idle_time)
-                            platforms_to_stop.append(platform)
+                        acp = self._acp_clients.get(key)
+                        if acp and acp.is_running():
+                            log.info("[Gateway] [%s] Idle timeout (%.0fs)", key, idle_time)
+                            keys_to_stop.append(key)
             
             # Stop outside the lock
-            for platform in platforms_to_stop:
-                self._stop_acp(platform)
+            for key in keys_to_stop:
+                self._stop_acp_by_key(key)
 
     def _get_adapter(self, platform: str) -> ChatAdapter | None:
         """Get adapter by platform name."""
@@ -478,7 +524,7 @@ class Gateway:
                 self._send_text_nowait(platform, chat_id, "❌ No active session")
             return
 
-        acp = self._get_acp(platform)
+        acp = self._get_acp(platform, chat_id)
         if not acp:
             if pending_cleared:
                 self._send_text_nowait(platform, chat_id, f"🗑️ Cleared {pending_cleared} queued message(s)")
@@ -517,7 +563,7 @@ class Gateway:
             ctx = self._contexts.get(key)
             session_id = ctx.session_id if ctx else None
 
-        acp = self._get_acp(platform)
+        acp = self._get_acp(platform, chat_id)
         response = self._get_agent_response(acp, session_id, mode_arg)
         self._send_text_nowait(platform, chat_id, response)
 
@@ -527,7 +573,7 @@ class Gateway:
             ctx = self._contexts.get(key)
             session_id = ctx.session_id if ctx else None
 
-        acp = self._get_acp(platform)
+        acp = self._get_acp(platform, chat_id)
         response = self._get_model_response(acp, session_id, model_arg)
         self._send_text_nowait(platform, chat_id, response)
 
@@ -547,7 +593,7 @@ class Gateway:
             ctx = self._contexts.get(key)
             session_id = ctx.session_id if ctx else None
         
-        acp = self._get_acp(platform)
+        acp = self._get_acp(platform, chat_id)
         
         if cmd == "help":
             return self._get_help_text()
@@ -863,7 +909,7 @@ class Gateway:
                 adapter.start_typing_loop(chat_id)
 
             try:
-                acp = self._ensure_acp(platform)
+                acp = self._ensure_acp(platform, chat_id)
             except Exception as e:
                 log.error("[Gateway] [%s] Failed to start kiro-cli: %s", platform, e)
                 error_msg = f"❌ Failed to start Kiro: {e}"
@@ -906,7 +952,7 @@ class Gateway:
 
             # Update activity
             with self._acp_lock:
-                self._last_activity[platform] = time.time()
+                self._last_activity[key] = time.time()
 
             response = format_response(result)
             final_card = self._active_cards.get(key) or card_handle
@@ -933,13 +979,13 @@ class Gateway:
             with self._contexts_lock:
                 self._contexts.pop(key, None)
             
-            # Check if this platform's ACP died
+            # Check if this chat's ACP died
             with self._acp_lock:
-                acp = self._acp_clients.get(platform)
+                acp = self._acp_clients.get(key)
                 if acp is not None and not acp.is_running():
-                    log.warning("[Gateway] [%s] kiro-cli died, will restart on next message", platform)
-                    self._acp_clients.pop(platform, None)
-                    self._last_activity.pop(platform, None)
+                    log.warning("[Gateway] [%s] kiro-cli died, will restart on next message", key)
+                    self._acp_clients.pop(key, None)
+                    self._last_activity.pop(key, None)
         
         finally:
             # Clean up active card reference

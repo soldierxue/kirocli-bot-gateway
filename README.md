@@ -34,8 +34,8 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 │         ┌────────────────┼────────────────┐                      │
 │         ▼                ▼                ▼                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
-│  │  kiro-cli   │  │  kiro-cli   │  │  kiro-cli   │  Per-platform│
-│  │  (feishu)   │  │  (discord)  │  │   (...)     │  instances   │
+│  │  kiro-cli   │  │  kiro-cli   │  │  kiro-cli   │  Per-chat    │
+│  │  (chat A)   │  │  (chat B)   │  │  (chat C)   │  instances   │
 │  └─────────────┘  └─────────────┘  └─────────────┘              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -43,11 +43,12 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 ## Features
 
 - **🔌 Multi-Platform**: Single gateway serves multiple chat platforms
-- **🔒 Platform Isolation**: Each platform gets its own Kiro CLI instance
+- **🔒 Chat Isolation**: Each chat gets its own Kiro CLI instance for parallel inference
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
-- **⏱️ Auto Idle Shutdown**: Configurable idle timeout per platform
+- **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
+- **🔄 LRU Eviction**: Automatic cleanup when instance limit is reached
 - **🖼️ Image Support**: Send images for visual analysis (JPEG, PNG, GIF, WebP) with auto MIME detection
 - **🛑 Cancel Operation**: Send "cancel" to interrupt
 - **🔧 MCP & Skills Support**: Global or project-level configuration
