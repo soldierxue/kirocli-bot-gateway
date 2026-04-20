@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from adapters.base import ChatAdapter, ChatType, IncomingMessage, CardHandle
 from acp_client import ACPClient, PromptResult, PermissionRequest
 from config import Config
+from session_map import SessionMap
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +127,11 @@ class Gateway:
         # session_id -> "platform:chat_id" mapping
         self._session_to_key: dict[str, str] = {}
         
+        # Session resume: persistent mapping of chat key → kiro-cli session ID
+        self._session_map = SessionMap(
+            path=os.path.join(config.kiro.gateway_state_dir, "session_map.json")
+        )
+        
         # Idle checker
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -138,6 +144,9 @@ class Gateway:
         """Start the gateway and all adapters."""
         log.info("[Gateway] Starting with per-chat Kiro CLI instances (workspace_mode=%s, max=%d)", 
                  self._config.kiro.workspace_mode, self._config.kiro.max_instances)
+
+        # Prune stale session map entries from previous runs
+        self._session_map.prune()
 
         # Start idle checker
         self._idle_checker_stop.clear()
@@ -674,6 +683,8 @@ class Gateway:
                         ctx = self._contexts.get(key)
                         if ctx:
                             ctx.mode_id = args
+                    # Persist to SessionMap so mode survives kiro-cli restart
+                    self._session_map.update_mode(key, args)
                 return f"✅ Switched to agent: **{args}**"
             except Exception as e:
                 return f"❌ Switch failed: {e}"
@@ -919,7 +930,7 @@ class Gateway:
                     self._send_text(platform, chat_id, error_msg)
                 return
 
-            session_id = self._get_or_create_session(platform, chat_id, key, acp)
+            session_id, _is_new = self._get_or_create_session(platform, chat_id, key, acp)
             self._session_to_key[session_id] = key
 
             # Save images to workspace so kiro can re-read them later via Read tool
@@ -994,22 +1005,57 @@ class Gateway:
             if adapter and not card_handle:
                 adapter.stop_typing_loop(chat_id)
 
-    def _get_or_create_session(self, platform: str, chat_id: str, key: str, acp: ACPClient) -> str:
-        """Get or create ACP session for a chat."""
+    def _get_or_create_session(self, platform: str, chat_id: str, key: str, acp: ACPClient) -> tuple[str, bool]:
+        """Get or create ACP session for a chat.
+        
+        Returns (session_id, is_new) where is_new=True means a fresh session
+        was created (no prior history). Resumed sessions return is_new=False.
+        
+        Resume flow: SessionMap lookup → session/load → fallback to session/new.
+        """
         # Get working directory based on workspace_mode (fixed or per_chat)
         work_dir = self._config.get_session_cwd(platform, chat_id)
         os.makedirs(work_dir, exist_ok=True)
 
+        # 1. In-memory session still alive → reuse
         with self._contexts_lock:
             ctx = self._contexts.get(key)
             if ctx and ctx.session_id:
-                # Session already in memory — just reuse it, no need to load.
-                # session/load is only needed after kiro-cli restart to restore
-                # from disk, but _start_acp clears _contexts on restart so we
-                # never reach here with a stale session_id.
                 log.info("[Gateway] [%s] Reusing session %s", key, ctx.session_id)
-                return ctx.session_id
+                return ctx.session_id, False
 
+        # 2. Try to resume from SessionMap (persisted across kiro-cli restarts)
+        saved = self._session_map.get(key)
+        if saved:
+            resume_sid = saved["sid"]
+            saved_mode = saved.get("mode_id", "")
+            try:
+                acp.session_load(resume_sid, work_dir)
+                log.info("[Gateway] [%s] Resumed session %s", key, resume_sid)
+
+                # Restore agent mode if user had switched via /agent
+                if saved_mode:
+                    try:
+                        acp.session_set_mode(resume_sid, saved_mode)
+                        log.info("[Gateway] [%s] Restored agent mode: %s", key, saved_mode)
+                    except Exception:
+                        log.warning("[Gateway] [%s] Failed to restore mode %s", key, saved_mode)
+
+                with self._contexts_lock:
+                    self._contexts[key] = ChatContext(
+                        chat_id=chat_id,
+                        platform=platform,
+                        session_id=resume_sid,
+                        mode_id=saved_mode,
+                    )
+                self._session_to_key[resume_sid] = key
+                return resume_sid, False
+
+            except Exception as e:
+                log.warning("[Gateway] [%s] session/load failed (%s), falling back to session/new", key, e)
+                self._session_map.delete(key)
+
+        # 3. Create fresh session
         session_id, modes = acp.session_new(work_dir)
         log.info("[Gateway] [%s] Created session %s (cwd: %s)", key, session_id, work_dir)
 
@@ -1020,4 +1066,7 @@ class Gateway:
                 session_id=session_id,
             )
         self._session_to_key[session_id] = key
-        return session_id
+
+        # Persist mapping for future resume
+        self._session_map.set(key, session_id)
+        return session_id, True

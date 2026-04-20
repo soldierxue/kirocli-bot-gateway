@@ -212,6 +212,7 @@ class KiroConfig:
     auto_approve: bool = False  # Auto-approve all permission requests from Kiro
     max_instances: int = 10  # Max concurrent kiro-cli instances (LRU eviction when exceeded)
     cold_start_limit: int = 4  # Max concurrent kiro-cli cold starts
+    gateway_state_dir: str = ""  # Persistent state dir (default: ~/.kirocli-gateway)
 
 
 @dataclass
@@ -391,6 +392,8 @@ def load_config() -> Config:
         auto_approve=os.getenv("KIRO_AUTO_APPROVE", "false").lower() in ("true", "1", "yes"),
         max_instances=int(os.getenv("KIRO_MAX_INSTANCES", "10")),
         cold_start_limit=int(os.getenv("KIRO_COLD_START_LIMIT", "4")),
+        gateway_state_dir=os.getenv("KIRO_GATEWAY_STATE_DIR",
+                                    os.path.expanduser("~/.kirocli-gateway")),
     )
 
     return Config(
