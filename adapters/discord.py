@@ -532,7 +532,26 @@ class DiscordAdapter(ChatAdapter):
         async def model_cmd(interaction: discord.Interaction, name: str = ""):
             await self._handle_slash_interaction(interaction, "model", name)
         
-        log.info("[Discord] Slash commands defined: /help, /agent, /model")
+        @self._tree.command(name="project", description="List, switch, or manage projects")
+        @app_commands.describe(action="ls / off / close / push / new <name> / <number> / <path>")
+        async def project_cmd(interaction: discord.Interaction, action: str = "ls"):
+            await self._handle_slash_interaction(interaction, "project", action)
+        
+        @self._tree.command(name="remember", description="Save a preference or rule to memory")
+        @app_commands.describe(text="What to remember")
+        async def remember_cmd(interaction: discord.Interaction, text: str):
+            await self._handle_slash_interaction(interaction, "remember", text)
+        
+        @self._tree.command(name="forget", description="Remove matching memories")
+        @app_commands.describe(keyword="Keyword to match and remove")
+        async def forget_cmd(interaction: discord.Interaction, keyword: str):
+            await self._handle_slash_interaction(interaction, "forget", keyword)
+        
+        @self._tree.command(name="memory", description="Show current memory contents")
+        async def memory_cmd(interaction: discord.Interaction):
+            await self._handle_slash_interaction(interaction, "memory", "")
+        
+        log.info("[Discord] Slash commands defined: /help, /agent, /model, /project, /remember, /forget, /memory")
     
     async def _sync_slash_commands(self):
         """Sync slash commands with Discord API.

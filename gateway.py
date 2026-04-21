@@ -881,6 +881,33 @@ class Gateway:
         if cmd == "model":
             return self._get_model_response(acp, session_id, args)
         
+        if cmd == "project":
+            # Project commands modify state via _handle_project_command (which uses
+            # _send_text_nowait). For slash commands we need a return value instead.
+            # Delegate to the text-based handler and capture the response.
+            self._handle_project_command(platform, chat_id, key, args)
+            return None  # Response already sent by handler
+        
+        if cmd == "remember":
+            if not args:
+                return "💡 Usage: /remember <something to remember>"
+            self._memory.add_lesson(args)
+            return f"✅ Remembered: {args}"
+        
+        if cmd == "forget":
+            if not args:
+                return "💡 Usage: /forget <keyword>"
+            if self._memory.remove_lesson(args):
+                return f"✅ Forgot lessons matching: {args}"
+            return f"❌ No lessons found matching: {args}"
+        
+        if cmd == "memory":
+            ws_id = self._ctx_builder._workspace_id(platform, chat_id)
+            ctx_text = self._memory.get_context(workspace_id=ws_id)
+            if ctx_text:
+                return f"🧠 **Current Memory** (workspace: {ws_id})\n\n{ctx_text}"
+            return "🧠 Memory is empty. Use /remember to add knowledge."
+        
         return f"❓ Unknown command: /{cmd}"
     
     def _get_help_text(self) -> str:
