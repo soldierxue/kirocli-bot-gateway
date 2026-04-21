@@ -42,9 +42,11 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
 - **🔌 多平台支持**：一个网关服务多个聊天平台
 - **🔒 聊天隔离**：每个聊天独立的 Kiro CLI 实例，并行推理
+- **📂 多项目支持**：在同一聊天中通过 `/project` 命令切换项目
 - **🧠 持久记忆**：用户偏好、项目上下文和纠正规则跨会话、跨平台保留
 - **🔄 会话恢复**：空闲超时、崩溃或网关重启后自动恢复对话历史
 - **📁 灵活的工作空间模式**：`per_chat`（用户隔离）或 `fixed`（共享项目）
+- **🤖 多飞书机器人**：运行多个飞书机器人实现并行项目工作（每个机器人对应一个项目）
 - **🔐 交互式权限审批**：敏感操作需用户确认（y/n/t）
 - **⚡ 按需启动**：仅在收到消息时启动 Kiro CLI
 - **⏱️ 空闲自动关闭**：可配置的空闲超时
@@ -350,6 +352,13 @@ journalctl -u kiro-gateway -f
 | `/agent <名称>` | 切换 Agent |
 | `/model` | 列出可用的模型 |
 | `/model <名称>` | 切换模型 |
+| `/project ls` | 列出活跃和最近项目（带序号） |
+| `/project <序号>` | 按序号切换项目 |
+| `/project <路径或名称>` | 按路径或简写名切换项目 |
+| `/project new <名称>` | 创建新项目目录 |
+| `/project push` | 提交并推送当前项目（通过 Kiro） |
+| `/project off` | 切回主会话 |
+| `/project close` | 永久关闭当前项目会话 |
 | `/remember <文本>` | 保存偏好或规则到持久记忆 |
 | `/forget <关键词>` | 删除匹配的记忆 |
 | `/memory` | 显示当前记忆内容 |
@@ -402,6 +411,7 @@ kirocli-bot-gateway/
 ├── memory.py                      # 两层持久记忆（偏好/教训 + 项目上下文）
 ├── context.py                     # 上下文构建器：新会话注入记忆
 ├── .env.example                   # 环境配置模板（复制为 .env）
+├── feishu_bots.example.json       # 多飞书机器人配置模板（可选）
 ├── discord_policy.json            # Discord 访问策略（可选，覆盖环境变量）
 ├── discord_policy.example.json    # Discord 策略示例（复制后编辑）
 ├── pyproject.toml                 # Python 包配置
@@ -425,6 +435,65 @@ kirocli-bot-gateway/
         ├── _global/projects.md    # 项目上下文（per_chat 模式）
         └── {hash}/projects.md     # 项目上下文（fixed 模式，按项目目录隔离）
 ```
+
+## 多项目会话
+
+在同一聊天中切换多个项目。每个项目有独立的 Kiro CLI 实例、独立的对话历史和项目级 `.kiro/` 配置。
+
+```
+/project /projects/myapp     → 切换到 myapp（启动 kiro-cli，cwd=/projects/myapp）
+"修复登录 bug"                → 消息路由到 myapp 的 kiro-cli
+/project /projects/infra     → 切换到 infra（myapp 继续运行）
+"检查 CDK 配置"               → 消息路由到 infra 的 kiro-cli
+/project 1                   → 按序号切回 myapp
+"bug 修好了吗？"              → myapp 的 kiro-cli 有完整对话历史
+/project off                 → 切回主会话
+```
+
+- `/project off` 保持项目会话存活（切回时零延迟）
+- `/project close` 永久销毁当前项目会话
+- `/project push` 让 Kiro 提交并推送（带工具审批）
+- `/project new <名称>` 创建目录并通过 Kiro 初始化
+- 空闲项目会话自动回收，需要时通过 `session/load` 恢复
+
+## 多飞书机器人
+
+飞书限制每个机器人与用户之间只有一个私聊窗口。要**并行**处理多个项目，可以创建多个飞书机器人——每个机器人一个聊天窗口。
+
+1. 在[飞书开放平台](https://open.feishu.cn/app)创建多个企业自建应用（每个项目一个）
+2. 从模板创建 `feishu_bots.json`：
+   ```bash
+   cp feishu_bots.example.json feishu_bots.json
+   ```
+3. 配置每个机器人：
+   ```json
+   {
+     "bots": [
+       {
+         "name": "app",
+         "app_id": "cli_xxx1",
+         "app_secret": "secret1",
+         "bot_name": "Kiro-App",
+         "kiro_cwd": "/projects/myapp",
+         "workspace_mode": "fixed"
+       },
+       {
+         "name": "infra",
+         "app_id": "cli_xxx2",
+         "app_secret": "secret2",
+         "bot_name": "Kiro-Infra",
+         "kiro_cwd": "/projects/infra",
+         "workspace_mode": "fixed"
+       }
+     ]
+   }
+   ```
+4. 启动网关——所有机器人同时连接：
+   ```bash
+   python main.py
+   ```
+
+当 `feishu_bots.json` 存在时，覆盖 `.env` 中的单机器人配置（`FEISHU_APP_ID`/`FEISHU_APP_SECRET`）。没有该文件时，单机器人模式照常工作（完全向后兼容）。
 
 ## 添加新平台
 

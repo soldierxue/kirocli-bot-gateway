@@ -44,9 +44,11 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 
 - **🔌 Multi-Platform**: Single gateway serves multiple chat platforms
 - **🔒 Chat Isolation**: Each chat gets its own Kiro CLI instance for parallel inference
+- **📂 Multi-Project**: Switch between projects in the same chat with `/project` commands
 - **🧠 Persistent Memory**: User preferences, project context, and learned corrections survive across sessions and platforms
 - **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
+- **🤖 Multi Feishu Bot**: Run multiple Feishu bots for parallel project work (one bot per project)
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
@@ -352,6 +354,13 @@ Send images alongside text for Kiro to analyze — screenshots, diagrams, error 
 | `/agent <name>` | Switch to agent |
 | `/model` | List available models |
 | `/model <name>` | Switch to model |
+| `/project ls` | List active and recent projects (numbered) |
+| `/project <number>` | Switch to project by index |
+| `/project <path or name>` | Switch to project by path or short name |
+| `/project new <name>` | Create new project directory |
+| `/project push` | Commit and push current project (via Kiro) |
+| `/project off` | Return to main session |
+| `/project close` | Close current project session permanently |
 | `/remember <text>` | Save a preference or rule to persistent memory |
 | `/forget <keyword>` | Remove matching memories |
 | `/memory` | Show current memory contents |
@@ -404,6 +413,7 @@ kirocli-bot-gateway/
 ├── memory.py                      # Two-layer persistent memory (prefs/lessons + projects)
 ├── context.py                     # Context builder: injects memory into new sessions
 ├── .env.example                   # Environment config template (copy to .env)
+├── feishu_bots.example.json       # Multi Feishu bot config template (optional)
 ├── discord_policy.json            # Discord access policy (optional, overrides env vars)
 ├── discord_policy.example.json    # Example Discord policy (copy and edit)
 ├── pyproject.toml                 # Python package config
@@ -427,6 +437,65 @@ kirocli-bot-gateway/
         ├── _global/projects.md    # Project context (per_chat mode)
         └── {hash}/projects.md     # Project context (fixed mode, per project dir)
 ```
+
+## Multi-Project Sessions
+
+Work on multiple projects in the same chat. Each project gets its own Kiro CLI instance with independent conversation history and project-level `.kiro/` configuration.
+
+```
+/project /projects/myapp     → Switch to myapp (starts kiro-cli with cwd=/projects/myapp)
+"Fix the login bug"          → Routed to myapp's kiro-cli
+/project /projects/infra     → Switch to infra (myapp keeps running)
+"Check CDK config"           → Routed to infra's kiro-cli
+/project 1                   → Switch back to myapp by index
+"Is the bug fixed?"          → myapp's kiro-cli has full conversation history
+/project off                 → Return to main session
+```
+
+- `/project off` keeps project sessions alive (instant switch back)
+- `/project close` destroys the current project session permanently
+- `/project push` asks Kiro to commit and push (with tool approval)
+- `/project new <name>` creates a directory and initializes via Kiro
+- Idle project sessions are auto-reclaimed and restored via `session/load` when needed
+
+## Multiple Feishu Bots
+
+Feishu limits each bot to one private chat per user. To work on multiple projects **in parallel**, create multiple Feishu bots — each gets its own chat window.
+
+1. Create multiple enterprise apps on [Feishu Open Platform](https://open.feishu.cn/app) (one per project)
+2. Create `feishu_bots.json` from the template:
+   ```bash
+   cp feishu_bots.example.json feishu_bots.json
+   ```
+3. Configure each bot:
+   ```json
+   {
+     "bots": [
+       {
+         "name": "app",
+         "app_id": "cli_xxx1",
+         "app_secret": "secret1",
+         "bot_name": "Kiro-App",
+         "kiro_cwd": "/projects/myapp",
+         "workspace_mode": "fixed"
+       },
+       {
+         "name": "infra",
+         "app_id": "cli_xxx2",
+         "app_secret": "secret2",
+         "bot_name": "Kiro-Infra",
+         "kiro_cwd": "/projects/infra",
+         "workspace_mode": "fixed"
+       }
+     ]
+   }
+   ```
+4. Start the gateway — all bots connect simultaneously:
+   ```bash
+   python main.py
+   ```
+
+When `feishu_bots.json` exists, it overrides the single-bot `FEISHU_APP_ID`/`FEISHU_APP_SECRET` in `.env`. Without the file, single-bot mode works as before (fully backward compatible).
 
 ## Adding New Platforms
 
