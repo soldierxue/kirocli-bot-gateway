@@ -49,6 +49,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🤖 Multi Feishu Bot**: Run multiple Feishu bots for parallel project work (one bot per project)
+- **📏 Context Monitoring**: Automatic context usage warnings (75%/90%) with `/compact` support
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
@@ -372,6 +373,18 @@ All commands work on both platforms, but the input method differs:
 | `/forget <keyword>` | Remove matching memories |
 | `/memory` | Show current memory contents |
 | `/help` | Show help |
+
+**Kiro CLI commands** (forwarded to kiro-cli for execution):
+
+| Command | Description |
+|---------|-------------|
+| `/compact` | Compress context window (free up space for longer conversations) |
+| `/usage` | Show API usage and quota |
+| `/tools` | List available tools and permissions |
+| `/mcp` | Show loaded MCP servers |
+| `/clear` | Clear conversation history |
+
+Any unrecognized `/command` is automatically forwarded to kiro-cli. Context usage is monitored — you'll see a warning when the context window reaches 75% or 90%.
 
 ### Other Commands
 
