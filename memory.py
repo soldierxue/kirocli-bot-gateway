@@ -58,10 +58,15 @@ class MemoryStore:
 
     # ── Global: Preferences ──
 
+    _MAX_FILE_SIZE = 5000  # chars — hard cap for preferences/projects files
+
     def read_preferences(self) -> str:
         return self._read(self._prefs)
 
     def write_preferences(self, content: str):
+        if len(content) > self._MAX_FILE_SIZE:
+            content = content[:self._MAX_FILE_SIZE] + "\n<!-- truncated -->\n"
+            log.warning("[Memory] Preferences truncated to %d chars", self._MAX_FILE_SIZE)
         self._write(self._prefs, content)
 
     # ── Global: Lessons ──
@@ -70,12 +75,28 @@ class MemoryStore:
         return self._read(self._lessons)
 
     def add_lesson(self, lesson: str):
-        """Append a lesson line, skipping if already present."""
+        """Append a lesson line, skipping if already present.
+        
+        Enforces a hard cap of 50 lessons. When exceeded, removes the oldest
+        entries (top of file after the header) to make room.
+        """
         content = self.read_lessons()
-        if lesson not in content:
-            content += f"- {lesson}\n"
-            self._write(self._lessons, content)
-            log.info("[Memory] Added lesson: %s", lesson[:80])
+        if lesson in content:
+            return
+        
+        lines = [l for l in content.splitlines() if l.strip()]
+        # Count lesson lines (starting with "- ")
+        lesson_lines = [l for l in lines if l.startswith("- ")]
+        if len(lesson_lines) >= 50:
+            # Remove oldest lessons (keep header + newest 40)
+            header_lines = [l for l in lines if not l.startswith("- ")]
+            kept = header_lines + lesson_lines[-39:]  # 39 + 1 new = 40
+            content = "\n".join(kept) + "\n"
+            log.info("[Memory] Lessons at cap (50), pruned to 40")
+        
+        content += f"- {lesson}\n"
+        self._write(self._lessons, content)
+        log.info("[Memory] Added lesson: %s", lesson[:80])
 
     def remove_lesson(self, keyword: str) -> bool:
         """Remove lesson lines containing keyword. Returns True if any removed."""
@@ -94,6 +115,10 @@ class MemoryStore:
         return self._read(self._projects_path(workspace_id))
 
     def write_projects(self, content: str, workspace_id: str = "_global"):
+        if len(content) > self._MAX_FILE_SIZE:
+            content = content[:self._MAX_FILE_SIZE] + "\n<!-- truncated -->\n"
+            log.warning("[Memory] Projects truncated to %d chars (ws=%s)",
+                        self._MAX_FILE_SIZE, workspace_id)
         self._write(self._projects_path(workspace_id), content)
 
     # ── Daily History ──

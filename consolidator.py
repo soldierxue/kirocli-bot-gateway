@@ -128,9 +128,11 @@ and return a JSON object with these keys:
    Keep "# Active Projects" header. Return existing content if nothing changed.
    NOTE: Projects are WORKSPACE-SCOPED — only for the current project.
 
-3. "lessons": Array of corrections or rules the user stated or implied.
+3. "lessons": The COMPLETE updated list of corrections and rules.
+   Merge with existing lessons, remove duplicates and contradictions.
    Each: {{"rule": "...", "category": "preference|tool|knowledge"}}.
-   Empty [] if no corrections found.
+   Return the full deduplicated list (not just new ones).
+   Empty [] ONLY if there are truly zero lessons (existing + new).
    NOTE: Lessons are GLOBAL — they apply across all projects.
 
 4. "history_entry": A concise paragraph (2-5 sentences) summarizing what
@@ -184,12 +186,19 @@ Respond with ONLY valid JSON, no markdown fences, no explanation."""
                 log.info("[Consolidator] Updated projects (ws=%s)", workspace_id)
 
         if lessons := result.get("lessons"):
-            if isinstance(lessons, list):
+            if isinstance(lessons, list) and lessons:
+                # Full replacement: LLM returns the complete deduplicated list
+                header = "# Learned Corrections\n\n<!-- Rules from user feedback -->\n"
+                lines = []
                 for lesson in lessons:
                     rule = lesson.get("rule", "") if isinstance(lesson, dict) else str(lesson)
                     if rule:
-                        self._memory.add_lesson(rule)
-                        changed = True
+                        lines.append(f"- {rule}")
+                if lines:
+                    content = header + "\n".join(lines) + "\n"
+                    self._memory._write(self._memory._lessons, content)
+                    changed = True
+                    log.info("[Consolidator] Replaced lessons (%d rules)", len(lines))
 
         if history_entry := result.get("history_entry"):
             if isinstance(history_entry, str) and history_entry.strip():
