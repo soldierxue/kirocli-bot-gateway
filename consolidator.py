@@ -196,7 +196,7 @@ Respond with ONLY valid JSON, no markdown fences, no explanation."""
                         lines.append(f"- {rule}")
                 if lines:
                     content = header + "\n".join(lines) + "\n"
-                    self._memory._write(self._memory._lessons, content)
+                    self._memory._safe_write(self._memory._lessons, content)
                     changed = True
                     log.info("[Consolidator] Replaced lessons (%d rules)", len(lines))
 

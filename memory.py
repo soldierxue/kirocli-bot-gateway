@@ -67,7 +67,7 @@ class MemoryStore:
         if len(content) > self._MAX_FILE_SIZE:
             content = content[:self._MAX_FILE_SIZE] + "\n<!-- truncated -->\n"
             log.warning("[Memory] Preferences truncated to %d chars", self._MAX_FILE_SIZE)
-        self._write(self._prefs, content)
+        self._safe_write(self._prefs, content)
 
     # ── Global: Lessons ──
 
@@ -119,7 +119,7 @@ class MemoryStore:
             content = content[:self._MAX_FILE_SIZE] + "\n<!-- truncated -->\n"
             log.warning("[Memory] Projects truncated to %d chars (ws=%s)",
                         self._MAX_FILE_SIZE, workspace_id)
-        self._write(self._projects_path(workspace_id), content)
+        self._safe_write(self._projects_path(workspace_id), content)
 
     # ── Daily History ──
 
@@ -256,4 +256,21 @@ class MemoryStore:
 
     def _write(self, path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def _safe_write(self, path: Path, content: str):
+        """Write with backup: rotates current → .bak before overwriting.
+        
+        Keeps exactly one backup (.bak). If the write fails, the .bak file
+        preserves the previous version for manual recovery.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            bak = path.with_suffix(path.suffix + ".bak")
+            try:
+                # Rotate: delete old .bak, rename current → .bak
+                bak.unlink(missing_ok=True)
+                path.rename(bak)
+            except OSError as e:
+                log.warning("[Memory] Backup failed for %s: %s", path.name, e)
         path.write_text(content, encoding="utf-8")
