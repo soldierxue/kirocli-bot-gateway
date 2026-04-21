@@ -22,12 +22,15 @@ class ContextBuilder:
         self._memory = memory
         self._config = config
 
-    def _workspace_id(self, platform: str, chat_id: str) -> str:
+    def _workspace_id(self, platform: str, chat_id: str, project: str = "") -> str:
         """Derive workspace_id from workspace_mode.
 
         per_chat mode: all chats share "_global" (no project concept).
         fixed mode: hash the cwd for a stable, filesystem-safe ID.
+        project override: hash the project path directly.
         """
+        if project:
+            return hashlib.sha256(project.encode()).hexdigest()[:12]
         mode = self._config.get_workspace_mode(platform)
         if mode == "per_chat":
             return "_global"
@@ -35,7 +38,8 @@ class ContextBuilder:
         return hashlib.sha256(cwd.encode()).hexdigest()[:12]
 
     def build_message(self, text: str, is_new_session: bool,
-                      platform: str = "", chat_id: str = "") -> str:
+                      platform: str = "", chat_id: str = "",
+                      project: str = "") -> str:
         """Wrap user message with memory context on new sessions.
 
         On follow-up messages, return text as-is (trust ACP native history).
@@ -50,7 +54,7 @@ class ContextBuilder:
         parts.append(f"[CURRENT DATE] {now.strftime('%A, %Y-%m-%d %H:%M %Z')}\n")
 
         # Memory context (global prefs/lessons + workspace-scoped projects)
-        ws_id = self._workspace_id(platform, chat_id) if platform else "_global"
+        ws_id = self._workspace_id(platform, chat_id, project) if platform else "_global"
         memory_ctx = self._memory.get_context(workspace_id=ws_id)
         if memory_ctx:
             parts.append(memory_ctx)

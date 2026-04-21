@@ -24,15 +24,30 @@ def main():
     adapters = []
 
     if config.feishu.enabled:
-        if not config.feishu.app_id or not config.feishu.app_secret:
-            log.error("Feishu enabled but FEISHU_APP_ID or FEISHU_APP_SECRET not set")
-            sys.exit(1)
-        log.info("Feishu adapter enabled")
-        adapters.append(FeishuAdapter(
-            app_id=config.feishu.app_id,
-            app_secret=config.feishu.app_secret,
-            bot_name=config.feishu.bot_name,
-        ))
+        if config.feishu.bots:
+            # Multi-bot mode (from feishu_bots.json)
+            for bot in config.feishu.bots:
+                if not bot.app_id or not bot.app_secret:
+                    log.error("Feishu bot '%s' missing app_id or app_secret", bot.name)
+                    continue
+                log.info("Feishu adapter enabled: %s (%s)", bot.name, bot.bot_name)
+                adapters.append(FeishuAdapter(
+                    app_id=bot.app_id,
+                    app_secret=bot.app_secret,
+                    bot_name=bot.bot_name,
+                    instance_name=bot.name,
+                ))
+        else:
+            # Single-bot mode (backward compat from .env)
+            if not config.feishu.app_id or not config.feishu.app_secret:
+                log.error("Feishu enabled but FEISHU_APP_ID or FEISHU_APP_SECRET not set")
+                sys.exit(1)
+            log.info("Feishu adapter enabled")
+            adapters.append(FeishuAdapter(
+                app_id=config.feishu.app_id,
+                app_secret=config.feishu.app_secret,
+                bot_name=config.feishu.bot_name,
+            ))
 
     if config.discord.enabled:
         if not config.discord.bot_token:

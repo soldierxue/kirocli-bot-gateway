@@ -1,0 +1,29 @@
+{
+  "_comment": "Multi Feishu Bot Configuration. Copy to feishu_bots.json and edit.",
+  "_comment2": "When feishu_bots.json exists, it overrides FEISHU_APP_ID/SECRET in .env.",
+  "bots": [
+    {
+      "name": "app",
+      "app_id": "cli_xxx1",
+      "app_secret": "YOUR_SECRET_1",
+      "bot_name": "Kiro-App",
+      "kiro_cwd": "/projects/myapp",
+      "workspace_mode": "fixed"
+    },
+    {
+      "name": "infra",
+      "app_id": "cli_xxx2",
+      "app_secret": "YOUR_SECRET_2",
+      "bot_name": "Kiro-Infra",
+      "kiro_cwd": "/projects/infra",
+      "workspace_mode": "fixed"
+    },
+    {
+      "name": "general",
+      "app_id": "cli_xxx3",
+      "app_secret": "YOUR_SECRET_3",
+      "bot_name": "Kiro",
+      "workspace_mode": "per_chat"
+    }
+  ]
+}

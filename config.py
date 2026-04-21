@@ -21,6 +21,17 @@ def _parse_workspace_mode(value: str | None, default: str = "per_chat") -> str:
 
 
 @dataclass
+class FeishuBotConfig:
+    """Configuration for a single Feishu bot instance (multi-bot mode)."""
+    name: str = ""
+    app_id: str = ""
+    app_secret: str = ""
+    bot_name: str = ""
+    kiro_cwd: str = ""
+    workspace_mode: str = ""
+
+
+@dataclass
 class FeishuConfig:
     """Feishu adapter configuration."""
     enabled: bool = False
@@ -29,6 +40,7 @@ class FeishuConfig:
     bot_name: str = ""
     kiro_cwd: str = ""  # Platform-specific working directory (optional)
     workspace_mode: str = ""  # Platform-specific mode (optional, fallback to global)
+    bots: list[FeishuBotConfig] = field(default_factory=list)  # Multi-bot (from feishu_bots.json)
 
 
 # =============================================================================
@@ -228,8 +240,17 @@ class Config:
     pending_cap: int = 20           # max pending messages per chat
 
     def get_workspace_mode(self, platform: str) -> str:
-        """Get workspace_mode for a platform (platform-specific or global default)."""
-        if platform == "feishu" and self.feishu.workspace_mode:
+        """Get workspace_mode for a platform (platform-specific or global default).
+        
+        Supports per-bot override for multi-bot configs (e.g. "feishu:app").
+        """
+        # Check per-bot config first (feishu:name format)
+        if ":" in platform and platform.split(":")[0] == "feishu":
+            bot_name = platform.split(":", 1)[1]
+            for bot in self.feishu.bots:
+                if bot.name == bot_name and bot.workspace_mode:
+                    return bot.workspace_mode
+        if platform.startswith("feishu") and self.feishu.workspace_mode:
             return self.feishu.workspace_mode
         elif platform == "discord" and self.discord.workspace_mode:
             return self.discord.workspace_mode
@@ -240,14 +261,19 @@ class Config:
         
         Returns None in per_chat mode (use global ~/.kiro/ config).
         Returns platform cwd in fixed mode (use project-level .kiro/ config).
+        Supports per-bot override for multi-bot configs (e.g. "feishu:app").
         """
         mode = self.get_workspace_mode(platform)
         if mode == "per_chat":
-            # Don't pass cwd, let kiro-cli use global config
             return None
         
-        # fixed mode: use platform-specific or default cwd
-        if platform == "feishu" and self.feishu.kiro_cwd:
+        # Check per-bot cwd (feishu:name format)
+        if ":" in platform and platform.split(":")[0] == "feishu":
+            bot_name = platform.split(":", 1)[1]
+            for bot in self.feishu.bots:
+                if bot.name == bot_name and bot.kiro_cwd:
+                    return bot.kiro_cwd
+        if platform.startswith("feishu") and self.feishu.kiro_cwd:
             return self.feishu.kiro_cwd
         elif platform == "discord" and self.discord.kiro_cwd:
             return self.discord.kiro_cwd
@@ -280,6 +306,35 @@ class Config:
         elif platform == "discord" and self.discord.kiro_cwd:
             return self.discord.kiro_cwd
         return self.kiro.default_cwd or os.getcwd()
+
+
+def _load_feishu_bots(config_dir: str) -> list[FeishuBotConfig]:
+    """Load multi-bot config from feishu_bots.json if it exists.
+    
+    When present, overrides the single-bot .env configuration.
+    """
+    bots_file = Path(config_dir) / "feishu_bots.json"
+    if not bots_file.exists():
+        return []
+    try:
+        with open(bots_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        bots = [
+            FeishuBotConfig(
+                name=b.get("name", ""),
+                app_id=b.get("app_id", ""),
+                app_secret=b.get("app_secret", ""),
+                bot_name=b.get("bot_name", ""),
+                kiro_cwd=b.get("kiro_cwd", ""),
+                workspace_mode=_parse_workspace_mode(b.get("workspace_mode"), ""),
+            )
+            for b in data.get("bots", [])
+        ]
+        log.info("Loaded %d Feishu bot(s) from %s", len(bots), bots_file)
+        return bots
+    except Exception as e:
+        log.error("Failed to load feishu_bots.json: %s", e)
+        return []
 
 
 def _load_discord_policy(config_dir: str) -> DiscordPolicy:
@@ -371,6 +426,7 @@ def load_config() -> Config:
         bot_name=os.getenv("FEISHU_BOT_NAME", ""),
         kiro_cwd=os.getenv("FEISHU_KIRO_CWD", ""),
         workspace_mode=_parse_workspace_mode(os.getenv("FEISHU_WORKSPACE_MODE"), ""),
+        bots=_load_feishu_bots(config_dir),
     )
 
     # Load Discord policy from JSON file

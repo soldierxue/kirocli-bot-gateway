@@ -27,10 +27,12 @@ log = logging.getLogger(__name__)
 class FeishuAdapter(ChatAdapter):
     """Feishu (Lark) implementation of ChatAdapter."""
 
-    def __init__(self, app_id: str, app_secret: str, bot_name: str):
+    def __init__(self, app_id: str, app_secret: str, bot_name: str,
+                 instance_name: str = ""):
         self._app_id = app_id
         self._app_secret = app_secret
         self._bot_name = bot_name
+        self._instance_name = instance_name
         self._message_callback: MessageCallback | None = None
         self._client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
         self._ws_client = None
@@ -44,6 +46,8 @@ class FeishuAdapter(ChatAdapter):
 
     @property
     def platform_name(self) -> str:
+        if self._instance_name:
+            return f"feishu:{self._instance_name}"
         return "feishu"
 
     def start(self, message_callback: MessageCallback) -> None:

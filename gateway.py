@@ -65,6 +65,7 @@ class ChatContext:
     platform: str
     session_id: str | None = None
     mode_id: str = ""  # Remember agent selection across session_load
+    active_project: str = ""  # Current project path (empty = main session)
 
 
 class Gateway:
@@ -147,6 +148,11 @@ class Gateway:
         """Create unique key for platform:chat_id combination."""
         return f"{platform}:{chat_id}"
 
+    def _make_project_key(self, platform: str, chat_id: str, project: str) -> str:
+        """Create key for a project-specific kiro-cli instance."""
+        base = self._make_key(platform, chat_id)
+        return f"{base}@{project}" if project else base
+
     def start(self):
         """Start the gateway and all adapters."""
         log.info("[Gateway] Starting with per-chat Kiro CLI instances (workspace_mode=%s, max=%d)", 
@@ -203,13 +209,16 @@ class Gateway:
         log.info("[Gateway] Starting %s adapter (blocking)...", last_adapter.platform_name)
         last_adapter.start(self._on_message)
 
-    def _start_acp(self, platform: str, chat_id: str) -> ACPClient:
+    def _start_acp(self, platform: str, chat_id: str, project: str = "") -> ACPClient:
         """Start ACP client for a specific chat if not running.
+        
+        When project is specified, the kiro-cli instance uses the project path
+        as cwd (loading project-level .kiro/ config).
         
         Limits concurrent cold starts via _start_sem.
         Evicts LRU instance if max_instances is reached.
         """
-        key = self._make_key(platform, chat_id)
+        key = self._make_project_key(platform, chat_id, project)
 
         # Fast path: already running
         with self._acp_lock:
@@ -238,7 +247,6 @@ class Gateway:
                     oldest_key = min(self._last_activity, key=self._last_activity.get)
                     log.info("[Gateway] Instance limit (%d) reached, evicting %s",
                              self._config.kiro.max_instances, oldest_key)
-                    # Evict outside lock below
                     evict_key = oldest_key
                 else:
                     evict_key = None
@@ -249,10 +257,12 @@ class Gateway:
             log.info("[Gateway] [%s] Starting kiro-cli...", key)
             acp = ACPClient(cli_path=self._config.kiro.path)
 
-            # Get cwd based on workspace_mode:
-            # - fixed mode: pass platform cwd (loads project-level .kiro/ config)
-            # - per_chat mode: pass None (loads global ~/.kiro/ config)
-            cwd = self._config.get_kiro_cwd(platform)
+            # Project sessions use the project path as cwd directly.
+            # Main sessions use workspace_mode logic (fixed → platform cwd, per_chat → None).
+            if project:
+                cwd = project
+            else:
+                cwd = self._config.get_kiro_cwd(platform)
             acp.start(cwd=cwd)
             if not self._config.kiro.auto_approve:
                 acp.on_permission_request(lambda req, p=platform: self._handle_permission(req, p))
@@ -297,9 +307,9 @@ class Gateway:
         for key in keys:
             self._stop_acp_by_key(key)
 
-    def _ensure_acp(self, platform: str, chat_id: str) -> ACPClient:
-        """Ensure ACP client is running for a chat."""
-        return self._start_acp(platform, chat_id)
+    def _ensure_acp(self, platform: str, chat_id: str, project: str = "") -> ACPClient:
+        """Ensure ACP client is running for a chat (or project session)."""
+        return self._start_acp(platform, chat_id, project=project)
 
     def _get_acp(self, platform: str, chat_id: str = "") -> ACPClient | None:
         """Get ACP client for a chat if running.
@@ -568,6 +578,8 @@ class Gateway:
             self._handle_agent_command(platform, chat_id, key, arg)
         elif cmd == "/model":
             self._handle_model_command(platform, chat_id, key, arg)
+        elif cmd == "/project":
+            self._handle_project_command(platform, chat_id, key, arg)
         elif cmd == "/remember":
             self._handle_remember_command(platform, chat_id, arg)
         elif cmd == "/forget":
@@ -635,6 +647,217 @@ class Gateway:
         else:
             self._send_text_nowait(platform, chat_id, "🧠 Memory is empty. Use /remember to add knowledge.")
 
+    # ── Project commands ──
+
+    def _handle_project_command(self, platform: str, chat_id: str, key: str, arg: str):
+        """Route /project subcommands."""
+        if not arg or arg == "ls":
+            self._handle_project_list(platform, chat_id, key)
+        elif arg == "off":
+            self._handle_project_off(platform, chat_id, key)
+        elif arg == "close":
+            self._handle_project_close(platform, chat_id, key)
+        elif arg == "push":
+            self._handle_project_push(platform, chat_id, key)
+        elif arg.startswith("new "):
+            name = arg[4:].strip()
+            self._handle_project_new(platform, chat_id, key, name)
+        elif arg.isdigit():
+            self._handle_project_switch_by_index(platform, chat_id, key, int(arg))
+        else:
+            self._handle_project_switch(platform, chat_id, key, arg)
+
+    def _build_project_list(self, key: str) -> tuple[list[str], list[str]]:
+        """Build ordered lists of active and recent project paths for a chat.
+
+        Returns (active_paths, recent_paths).
+        Active = kiro-cli running. Recent = session_map entry but kiro-cli stopped.
+        """
+        active: list[str] = []
+        prefix = f"{key}@"
+
+        with self._acp_lock:
+            for acp_key, acp in self._acp_clients.items():
+                if acp_key.startswith(prefix) and acp.is_running():
+                    project_path = acp_key.split("@", 1)[1]
+                    active.append(project_path)
+
+        recent: list[str] = []
+        for map_key in list(self._session_map._data.keys()):
+            if map_key.startswith(prefix):
+                project_path = map_key.split("@", 1)[1]
+                if project_path not in active:
+                    if self._session_map.get(map_key) is not None:
+                        recent.append(project_path)
+
+        return active, recent
+
+    def _handle_project_list(self, platform: str, chat_id: str, key: str):
+        """Handle /project ls — list active and recent projects."""
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            current = ctx.active_project if ctx else ""
+
+        active, recent = self._build_project_list(key)
+        all_projects = active + recent
+
+        if not all_projects and not current:
+            self._send_text_nowait(platform, chat_id,
+                                   "📂 No projects loaded.\n\n"
+                                   "💡 /project <path> to switch to a project\n"
+                                   "💡 /project new <name> to create one")
+            return
+
+        lines: list[str] = []
+        if current:
+            name = os.path.basename(current)
+            idx = all_projects.index(current) + 1 if current in all_projects else "?"
+            lines.append(f"📂 Current: [{idx}] {name} ◀\n")
+
+        if active:
+            lines.append("🟢 **Active** (kiro-cli running):")
+            for i, p in enumerate(active, 1):
+                name = os.path.basename(p)
+                marker = " ◀" if p == current else ""
+                lines.append(f"  [{i}] {name} — {p}{marker}")
+
+        if recent:
+            lines.append("\n💤 **Recent** (resumable):")
+            offset = len(active)
+            for i, p in enumerate(recent, offset + 1):
+                name = os.path.basename(p)
+                lines.append(f"  [{i}] {name} — {p}")
+
+        lines.append("\n💡 /project <number> to switch, /project off to return to main session")
+        self._send_text_nowait(platform, chat_id, "\n".join(lines))
+
+    def _resolve_project_path(self, key: str, arg: str) -> str | None:
+        """Resolve project path from user input.
+
+        Priority: absolute path → short name match → relative to KIRO_CWD.
+        """
+        if os.path.isabs(arg):
+            path = os.path.realpath(arg)
+            return path if os.path.isdir(path) else None
+
+        # Short name: search active + recent projects
+        active, recent = self._build_project_list(key)
+        for p in active + recent:
+            if os.path.basename(p) == arg:
+                return p
+
+        # Relative to KIRO_CWD
+        base = self._config.kiro.default_cwd or os.getcwd()
+        path = os.path.realpath(os.path.join(base, arg))
+        return path if os.path.isdir(path) else None
+
+    def _handle_project_switch(self, platform: str, chat_id: str, key: str, arg: str):
+        """Handle /project <path or name> — switch to a project."""
+        path = self._resolve_project_path(key, arg)
+        if not path:
+            self._send_text_nowait(platform, chat_id, f"❌ Directory not found: {arg}")
+            return
+
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            if not ctx:
+                ctx = ChatContext(chat_id=chat_id, platform=platform)
+                self._contexts[key] = ctx
+            ctx.active_project = path
+
+        name = os.path.basename(path)
+        self._send_text_nowait(platform, chat_id, f"📂 Switched to project: **{name}** ({path})")
+
+    def _handle_project_switch_by_index(self, platform: str, chat_id: str, key: str, idx: int):
+        """Handle /project <number> — switch by index from project list."""
+        active, recent = self._build_project_list(key)
+        all_projects = active + recent
+        if idx < 1 or idx > len(all_projects):
+            self._send_text_nowait(platform, chat_id,
+                                   f"❌ Invalid index: {idx}. Use /project ls to see available projects.")
+            return
+        path = all_projects[idx - 1]
+        self._handle_project_switch(platform, chat_id, key, path)
+
+    def _handle_project_off(self, platform: str, chat_id: str, key: str):
+        """Handle /project off — return to main session without destroying project sessions."""
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            if ctx:
+                ctx.active_project = ""
+        self._send_text_nowait(platform, chat_id, "📂 Returned to main session")
+
+    def _handle_project_close(self, platform: str, chat_id: str, key: str):
+        """Handle /project close — destroy current project session and return to main."""
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            active_project = ctx.active_project if ctx else ""
+
+        if not active_project:
+            self._send_text_nowait(platform, chat_id, "❌ No active project to close")
+            return
+
+        project_key = self._make_project_key(platform, chat_id, active_project)
+        self._stop_acp_by_key(project_key)
+        self._session_map.delete(project_key)
+
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            if ctx:
+                ctx.active_project = ""
+
+        name = os.path.basename(active_project)
+        self._send_text_nowait(platform, chat_id,
+                               f"📂 Closed project: **{name}**. Returned to main session.")
+
+    def _handle_project_new(self, platform: str, chat_id: str, key: str, name: str):
+        """Handle /project new <name> — create directory, switch, inject init message."""
+        if not name:
+            self._send_text_nowait(platform, chat_id, "💡 Usage: /project new <name>")
+            return
+
+        base = self._config.kiro.default_cwd or os.getcwd()
+        path = os.path.realpath(os.path.join(base, name))
+        os.makedirs(path, exist_ok=True)
+
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            if not ctx:
+                ctx = ChatContext(chat_id=chat_id, platform=platform)
+                self._contexts[key] = ctx
+            ctx.active_project = path
+
+        self._send_text_nowait(platform, chat_id, f"📂 Created project: **{name}** ({path})")
+
+        # Inject init message into pending buffer so kiro-cli can help set up
+        init_msg = ("This is a new empty project directory. "
+                    "Please help me initialize it. "
+                    "Ask me what kind of project this is.")
+        with self._pending_lock:
+            if key not in self._pending_messages:
+                self._pending_messages[key] = []
+            self._pending_messages[key].append((init_msg, None))
+        self._reset_debounce(platform, chat_id, key)
+
+    def _handle_project_push(self, platform: str, chat_id: str, key: str):
+        """Handle /project push — inject git push message to kiro-cli."""
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            active_project = ctx.active_project if ctx else ""
+
+        if not active_project:
+            self._send_text_nowait(platform, chat_id,
+                                   "❌ No active project. Use /project <path> first")
+            return
+
+        push_msg = ("Please commit all current changes with an appropriate commit message "
+                    "and push to the remote repository. Show me the git status first.")
+        with self._pending_lock:
+            if key not in self._pending_messages:
+                self._pending_messages[key] = []
+            self._pending_messages[key].append((push_msg, None))
+        self._reset_debounce(platform, chat_id, key)
+
     def _handle_slash_command(self, platform: str, chat_id: str, cmd: str, args: str) -> str | None:
         """Handle slash command from Discord adapter.
         
@@ -671,6 +894,15 @@ class Gateway:
 **Model:**
 • /model - List available models
 • /model model_name - Switch model
+
+**Project:**
+• /project ls - List active and recent projects
+• /project <number> - Switch to project by index
+• /project <path or name> - Switch to project
+• /project new <name> - Create new project
+• /project push - Commit and push current project
+• /project off - Return to main session
+• /project close - Close current project session
 
 **Memory:**
 • /remember <text> - Save a preference or rule
@@ -970,7 +1202,13 @@ class Gateway:
                 adapter.start_typing_loop(chat_id)
 
             try:
-                acp = self._ensure_acp(platform, chat_id)
+                # Determine active project for routing
+                with self._contexts_lock:
+                    ctx = self._contexts.get(key)
+                    active_project = ctx.active_project if ctx else ""
+                effective_key = self._make_project_key(platform, chat_id, active_project)
+
+                acp = self._ensure_acp(platform, chat_id, project=active_project)
             except Exception as e:
                 log.error("[Gateway] [%s] Failed to start kiro-cli: %s", platform, e)
                 error_msg = f"❌ Failed to start Kiro: {e}"
@@ -980,12 +1218,12 @@ class Gateway:
                     self._send_text(platform, chat_id, error_msg)
                 return
 
-            session_id, _is_new = self._get_or_create_session(platform, chat_id, key, acp)
-            self._session_to_key[session_id] = key
+            session_id, _is_new = self._get_or_create_session(platform, chat_id, effective_key, acp)
+            self._session_to_key[session_id] = key  # Map back to chat key for permissions
 
-            # Save images to workspace so kiro can re-read them later via Read tool
+            # Save images to workspace
             if images:
-                work_dir = self._config.get_session_cwd(platform, chat_id)
+                work_dir = active_project or self._config.get_session_cwd(platform, chat_id)
                 saved_paths = self._save_images(work_dir, images)
                 if saved_paths:
                     path_note = ", ".join(saved_paths)
@@ -993,7 +1231,8 @@ class Gateway:
 
             # Inject memory context on new sessions (preferences, projects, lessons)
             text = self._ctx_builder.build_message(
-                text, is_new_session=_is_new, platform=platform, chat_id=chat_id
+                text, is_new_session=_is_new, platform=platform, chat_id=chat_id,
+                project=active_project
             )
 
             # Send to Kiro (with streaming for card-based platforms)
@@ -1021,6 +1260,10 @@ class Gateway:
                 self._last_activity[key] = time.time()
 
             response = format_response(result)
+            # Add project label so user knows which project responded
+            if active_project:
+                project_name = os.path.basename(active_project)
+                response = f"📂 **[{project_name}]**\n\n{response}"
             final_card = self._active_cards.get(key) or card_handle
             if final_card:
                 self._update_card(platform, final_card, response)
