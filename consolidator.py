@@ -133,6 +133,12 @@ and return a JSON object with these keys:
    Empty [] if no corrections found.
    NOTE: Lessons are GLOBAL — they apply across all projects.
 
+4. "history_entry": A concise paragraph (2-5 sentences) summarizing what
+   happened in this conversation. Include key decisions, outcomes, and facts.
+   Use present tense. Example: "User fixed login bug in myapp using
+   pytest-asyncio strict mode. Decided to add retry logic for S3 uploads."
+   Return empty string "" if the conversation was trivial (greetings only).
+
 ## Current Preferences (global)
 {current_prefs or '(empty)'}
 
@@ -184,5 +190,11 @@ Respond with ONLY valid JSON, no markdown fences, no explanation."""
                     if rule:
                         self._memory.add_lesson(rule)
                         changed = True
+
+        if history_entry := result.get("history_entry"):
+            if isinstance(history_entry, str) and history_entry.strip():
+                self._memory.append_history(history_entry)
+                changed = True
+                log.info("[Consolidator] Appended history entry")
 
         return changed

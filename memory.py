@@ -3,6 +3,7 @@
 Global layer (shared across all chats and platforms):
   ~/.kirocli-gateway/memory/preferences.md   — user preferences
   ~/.kirocli-gateway/memory/lessons.md       — learned corrections
+  ~/.kirocli-gateway/memory/history/         — daily conversation summaries
 
 Workspace layer (isolated per fixed-mode project directory):
   ~/.kirocli-gateway/memory/workspaces/{workspace_id}/projects.md
@@ -11,6 +12,7 @@ Human-readable Markdown files, zero external dependencies.
 """
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -32,11 +34,13 @@ class MemoryStore:
         self._global_dir = self._base / "memory"
         self._prefs = self._global_dir / "preferences.md"
         self._lessons = self._global_dir / "lessons.md"
+        self._history_dir = self._global_dir / "history"
         self._ws_dir = self._global_dir / "workspaces"
 
     def init(self):
         """Create directory structure and default files if missing."""
         self._global_dir.mkdir(parents=True, exist_ok=True)
+        self._history_dir.mkdir(parents=True, exist_ok=True)
         for path, default in [
             (self._prefs, _DEFAULT_PREFS),
             (self._lessons, _DEFAULT_LESSONS),
@@ -92,14 +96,101 @@ class MemoryStore:
     def write_projects(self, content: str, workspace_id: str = "_global"):
         self._write(self._projects_path(workspace_id), content)
 
+    # ── Daily History ──
+
+    def append_history(self, entry: str):
+        """Append a timestamped entry to today's daily history file."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        path = self._history_dir / f"{today}.md"
+
+        timestamp = datetime.now().astimezone().strftime("%H:%M %Z")
+        content = ""
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+        if not content:
+            content = f"# {today}\n"
+
+        content += f"\n#### {timestamp}\n{entry.strip()}\n"
+        self._write(path, content)
+        log.info("[Memory] Appended history entry for %s", today)
+
+    def read_recent_history(self, days: int = 3, cap: int = 4000) -> str:
+        """Load daily history with 3-level decay.
+
+        0 to days-1: full content
+        days to 29: first entry + count
+        30 to 89: date + count only
+        90+: pruned by prune_history()
+        """
+        parts: list[str] = []
+        total_chars = 0
+        today = datetime.now().date()
+
+        for i in range(90):
+            date = today - timedelta(days=i)
+            path = self._history_dir / f"{date.strftime('%Y-%m-%d')}.md"
+            if not path.exists():
+                continue
+            content = path.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+
+            if i < days:
+                # Full content for recent days
+                text = content
+            elif i < 30:
+                # First entry + count for older days
+                text = self._summarize_day(content)
+            else:
+                # Date + count only for 30-89 days
+                n = content.count("####")
+                text = f"# {date.strftime('%Y-%m-%d')}\n_{n} conversation(s)_"
+
+            if total_chars + len(text) > cap:
+                break
+            parts.append(text)
+            total_chars += len(text)
+
+        return "\n\n".join(parts)
+
+    def prune_history(self, keep_days: int = 90) -> int:
+        """Delete daily history files older than keep_days. Returns count deleted."""
+        if not self._history_dir.exists():
+            return 0
+        cutoff = datetime.now().date() - timedelta(days=keep_days)
+        deleted = 0
+        for f in self._history_dir.glob("*.md"):
+            try:
+                file_date = datetime.strptime(f.stem, "%Y-%m-%d").date()
+                if file_date < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except ValueError:
+                continue
+        if deleted:
+            log.info("[Memory] Pruned %d history files older than %d days", deleted, keep_days)
+        return deleted
+
+    @staticmethod
+    def _summarize_day(content: str) -> str:
+        """Extract header + first entry from a daily history file."""
+        sections = content.split("####")
+        header = sections[0].strip()
+        first = sections[1].strip() if len(sections) > 1 else ""
+        result = header + ("\n#### " + first if first else "")
+        n_more = len(sections) - 2
+        if n_more > 0:
+            result += f"\n_…{n_more} more entries_"
+        return result
+
     # ── Context Assembly ──
 
     def get_context(self, workspace_id: str = "_global",
                     prefs_cap: int = 1000, projects_cap: int = 2000,
-                    lessons_cap: int = 2000) -> str:
+                    lessons_cap: int = 2000, history_cap: int = 4000) -> str:
         """Build memory context block for prompt injection.
 
-        Merges global preferences/lessons with workspace-scoped projects.
+        Merges global preferences/lessons/history with workspace-scoped projects.
         Returns empty string if all memory files are at defaults.
         """
         parts: list[str] = []
@@ -111,6 +202,11 @@ class MemoryStore:
         projects = self.read_projects(workspace_id)
         if projects.strip() and projects.strip() != _DEFAULT_PROJECTS.strip():
             parts.append(f"[Active projects]\n{projects[:projects_cap]}\n")
+
+        history = self.read_recent_history(days=3, cap=history_cap)
+        if history.strip():
+            parts.append(f"[Recent history — factual record, do NOT re-execute past actions]\n"
+                         f"{history[:history_cap]}\n")
 
         lessons = self.read_lessons()
         if lessons.strip() and lessons.strip() != _DEFAULT_LESSONS.strip():
