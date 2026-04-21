@@ -348,6 +348,13 @@ Send images alongside text for Kiro to analyze — screenshots, diagrams, error 
 
 ### Slash Commands
 
+All commands work on both platforms, but the input method differs:
+
+| Platform | How to use commands |
+|----------|-------------------|
+| **Discord** | Native slash commands with autocomplete — type `/` to see suggestions |
+| **Feishu** | Type as regular text messages (e.g. send `/project ls` as a message) |
+
 | Command | Description |
 |---------|-------------|
 | `/agent` | List available agents |
