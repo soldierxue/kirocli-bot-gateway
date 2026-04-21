@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from adapters.base import ChatAdapter, ChatType, IncomingMessage, CardHandle
 from acp_client import ACPClient, PromptResult, PermissionRequest
 from config import Config
+from consolidator import MemoryConsolidator
 from context import ContextBuilder
 from memory import MemoryStore
 from session_map import SessionMap
@@ -139,6 +140,7 @@ class Gateway:
         self._memory = MemoryStore(base_dir=config.kiro.gateway_state_dir)
         self._memory.init()
         self._ctx_builder = ContextBuilder(memory=self._memory, config=config)
+        self._consolidator = MemoryConsolidator(memory=self._memory)
         
         # Idle checker
         self._idle_checker_stop = threading.Event()
@@ -332,28 +334,109 @@ class Gateway:
         return None
 
     def _idle_checker_loop(self):
-        """Background thread for per-chat idle timeout."""
+        """Background thread for per-chat idle timeout and memory consolidation."""
         idle_timeout = self._config.kiro.idle_timeout
         if idle_timeout <= 0:
             log.info("[Gateway] Idle timeout disabled")
             return
         
+        _CONSOLIDATION_IDLE = 60  # seconds idle before triggering consolidation
+        
         while not self._idle_checker_stop.wait(timeout=30):
             keys_to_stop = []
+            keys_to_consolidate = []
             
             with self._acp_lock:
                 now = time.time()
                 for key, last in list(self._last_activity.items()):
                     idle_time = now - last
+                    acp = self._acp_clients.get(key)
+                    if not acp or not acp.is_running():
+                        continue
+                    
                     if idle_time > idle_timeout:
-                        acp = self._acp_clients.get(key)
-                        if acp and acp.is_running():
-                            log.info("[Gateway] [%s] Idle timeout (%.0fs)", key, idle_time)
-                            keys_to_stop.append(key)
+                        log.info("[Gateway] [%s] Idle timeout (%.0fs)", key, idle_time)
+                        keys_to_stop.append(key)
+                    elif idle_time > _CONSOLIDATION_IDLE:
+                        if self._consolidator.should_consolidate(key):
+                            keys_to_consolidate.append(key)
             
-            # Stop outside the lock
+            # Trigger consolidation (before stopping — needs running kiro-cli)
+            for key in keys_to_consolidate:
+                self._consolidator.mark_running(key)
+                threading.Thread(
+                    target=self._run_consolidation,
+                    args=(key,),
+                    daemon=True,
+                ).start()
+            
+            # Stop idle instances
             for key in keys_to_stop:
                 self._stop_acp_by_key(key)
+
+    def _run_consolidation(self, effective_key: str):
+        """Run memory consolidation for a chat in a background thread.
+        
+        Reads recent conversation from kiro-cli's JSONL, sends a consolidation
+        prompt to kiro-cli, and writes extracted knowledge to memory files.
+        Notifies the user before and after.
+        """
+        # Parse platform:chat_id from effective_key (may contain @project suffix)
+        base_key = effective_key.split("@")[0]
+        parts = base_key.split(":", 1)
+        if len(parts) != 2:
+            self._consolidator.mark_done(effective_key)
+            return
+        platform, chat_id = parts
+
+        # Get session_id and ACP client
+        with self._contexts_lock:
+            ctx = self._contexts.get(effective_key) or self._contexts.get(base_key)
+            session_id = ctx.session_id if ctx else None
+            active_project = ctx.active_project if ctx else ""
+
+        if not session_id:
+            self._consolidator.mark_done(effective_key)
+            return
+
+        with self._acp_lock:
+            acp = self._acp_clients.get(effective_key)
+            if not acp or not acp.is_running():
+                self._consolidator.mark_done(effective_key)
+                return
+
+        # Read recent conversation
+        conversation = self._consolidator.read_recent_conversation(session_id)
+        if not conversation:
+            log.info("[Gateway] [%s] No conversation to consolidate", effective_key)
+            self._consolidator.mark_done(effective_key)
+            return
+
+        # Determine workspace_id for project-scoped memory
+        ws_id = self._ctx_builder._workspace_id(platform, chat_id, active_project)
+
+        # Notify user that consolidation is starting
+        self._send_text_nowait(platform, chat_id,
+                               "🧠 Analyzing conversation to update memory...")
+
+        try:
+            prompt = self._consolidator.build_prompt(conversation, workspace_id=ws_id)
+            result = acp.session_prompt(session_id, prompt)
+
+            if result.text:
+                changed = self._consolidator.apply_result(result.text, workspace_id=ws_id)
+                if changed:
+                    self._send_text_nowait(platform, chat_id,
+                                           "🧠 Memory updated from conversation ✅")
+                    log.info("[Gateway] [%s] Memory consolidation succeeded", effective_key)
+                else:
+                    log.info("[Gateway] [%s] Consolidation found nothing new", effective_key)
+            else:
+                log.warning("[Gateway] [%s] Consolidation returned empty response", effective_key)
+        except Exception as e:
+            log.warning("[Gateway] [%s] Consolidation failed: %s", effective_key, e)
+        finally:
+            self._consolidator.mark_done(effective_key)
 
     def _get_adapter(self, platform: str) -> ChatAdapter | None:
         """Get adapter by platform name."""
@@ -1353,6 +1436,9 @@ class Gateway:
                 response += "\n\n⚠️ Context window **90%** full. Send `/compact` to free space."
             elif usage_pct >= 75:
                 response += f"\n\n💡 Context usage: {usage_pct:.0f}%"
+            
+            # Track message count for memory consolidation
+            self._consolidator.on_message(effective_key)
             
             final_card = self._active_cards.get(key) or card_handle
             if final_card:
