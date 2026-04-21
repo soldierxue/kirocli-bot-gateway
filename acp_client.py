@@ -68,6 +68,8 @@ class ACPClient:
         # Stream callbacks: session_id -> callable(chunk_text: str, accumulated_text: str)
         self._stream_callbacks: dict[str, Callable] = {}
         self._stream_accum: dict[str, list[str]] = {}
+        # Context usage tracking: session_id -> last known usage percentage
+        self._context_usage: dict[str, float] = {}
         self._running = False
 
     def on_permission_request(self, handler: PermissionHandler):
@@ -266,6 +268,41 @@ class ACPClient:
     def get_available_commands(self, session_id: str) -> list:
         """Get available commands for a session (from _kiro.dev/commands/available notification)."""
         return self._session_commands.get(session_id, [])
+
+    def get_context_usage(self, session_id: str) -> float:
+        """Return last known context usage percentage (0-100). 0 if never reported."""
+        return self._context_usage.get(session_id, 0.0)
+
+    def execute_command(self, session_id: str, command: str, timeout: float = 60) -> str:
+        """Execute a kiro-cli slash command (e.g. '/compact', '/usage').
+
+        Uses _kiro.dev/commands/execute ACP method.
+        Returns the command output text.
+        """
+        # Parse "/compact args" into {command: "compact", args: "args"}
+        stripped = command.lstrip("/")
+        parts = stripped.split(maxsplit=1)
+        cmd_name = parts[0]
+        cmd_args = parts[1] if len(parts) > 1 else ""
+
+        result = self._send_request("_kiro.dev/commands/execute", {
+            "sessionId": session_id,
+            "command": {"command": cmd_name, "args": cmd_args},
+        }, timeout=timeout)
+
+        return self._format_command_result(result)
+
+    @staticmethod
+    def _format_command_result(result: dict) -> str:
+        """Extract displayable text from a commands/execute response."""
+        if isinstance(result, dict):
+            for key in ("output", "text", "message", "content"):
+                if key in result and isinstance(result[key], str):
+                    return result[key]
+            # Fallback: JSON dump (skip empty results)
+            if result:
+                return json.dumps(result, indent=2, ensure_ascii=False)
+        return str(result) if result else ""
 
     @staticmethod
     def _detect_image_mime(b64_data: str) -> str | None:
@@ -485,6 +522,15 @@ class ACPClient:
                                 cb(chunk_text, "".join(accum))
                             except Exception as e:
                                 log.debug("[ACP] Stream callback error: %s", e)
+                
+                # Track context usage from metadata events
+                elif update.get("sessionUpdate") == "metadata":
+                    pct = update.get("contextUsagePercent")
+                    if pct is None:
+                        pct = update.get("context_usage_pct")
+                    if session_id and pct is not None:
+                        self._context_usage[session_id] = float(pct)
+                        log.debug("[ACP] Context usage for %s: %.1f%%", session_id, pct)
             
             elif method == "_kiro.dev/commands/available":
                 # Store available commands for this session

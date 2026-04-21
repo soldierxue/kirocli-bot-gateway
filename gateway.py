@@ -589,7 +589,8 @@ class Gateway:
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
-            self._send_text_nowait(platform, chat_id, f"❓ Unknown command: {cmd}\n💡 Send /help for available commands")
+            # Unknown gateway command → try forwarding to kiro-cli
+            self._handle_kiro_command(platform, chat_id, key, text)
 
     def _handle_agent_command(self, platform: str, chat_id: str, key: str, mode_arg: str):
         """Handle /agent command (text-based)."""
@@ -614,6 +615,45 @@ class Gateway:
     def _handle_help_command(self, platform: str, chat_id: str):
         """Show help."""
         self._send_text_nowait(platform, chat_id, self._get_help_text())
+
+    def _handle_kiro_command(self, platform: str, chat_id: str, key: str, text: str):
+        """Forward an unrecognized slash command to kiro-cli for execution.
+        
+        Supports kiro-cli native commands like /compact, /usage, /tools, /mcp, etc.
+        """
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            session_id = ctx.session_id if ctx else None
+            active_project = ctx.active_project if ctx else ""
+
+        if not session_id:
+            self._send_text_nowait(platform, chat_id,
+                                   "❌ No active session. Send a message first.")
+            return
+
+        effective_key = self._make_project_key(platform, chat_id, active_project)
+        acp = self._get_acp(platform, chat_id) if not active_project else None
+        if not acp:
+            # Try project-specific ACP
+            with self._acp_lock:
+                acp = self._acp_clients.get(effective_key)
+                if acp and not acp.is_running():
+                    acp = None
+        if not acp:
+            self._send_text_nowait(platform, chat_id, "❌ Kiro is not running")
+            return
+
+        try:
+            output = acp.execute_command(session_id, text)
+            label = ""
+            if active_project:
+                label = f"📂 **[{os.path.basename(active_project)}]** "
+            if output:
+                self._send_text_nowait(platform, chat_id, f"{label}{output}")
+            else:
+                self._send_text_nowait(platform, chat_id, f"{label}✓ Done")
+        except Exception as e:
+            self._send_text_nowait(platform, chat_id, f"❌ Command failed: {e}")
 
     def _handle_remember_command(self, platform: str, chat_id: str, arg: str):
         """Handle /remember <text> — save a lesson to persistent memory."""
@@ -908,6 +948,14 @@ class Gateway:
                 return f"🧠 **Current Memory** (workspace: {ws_id})\n\n{ctx_text}"
             return "🧠 Memory is empty. Use /remember to add knowledge."
         
+        # Unknown gateway command → try forwarding to kiro-cli
+        if session_id and acp:
+            try:
+                output = acp.execute_command(session_id, f"/{cmd} {args}".strip())
+                return output if output else "✓ Done"
+            except Exception as e:
+                return f"❌ Command failed: {e}"
+        
         return f"❓ Unknown command: /{cmd}"
     
     def _get_help_text(self) -> str:
@@ -935,6 +983,13 @@ class Gateway:
 • /remember <text> - Save a preference or rule
 • /forget <keyword> - Remove matching memories
 • /memory - Show current memory
+
+**Kiro CLI** (forwarded to kiro-cli):
+• /compact - Compress context window
+• /usage - Show usage and quota
+• /tools - List available tools
+• /mcp - Show loaded MCP servers
+• /clear - Clear conversation
 
 **Other:**
 • /help - Show this help"""
@@ -1291,6 +1346,14 @@ class Gateway:
             if active_project:
                 project_name = os.path.basename(active_project)
                 response = f"📂 **[{project_name}]**\n\n{response}"
+            
+            # Context usage warning
+            usage_pct = acp.get_context_usage(session_id)
+            if usage_pct >= 90:
+                response += "\n\n⚠️ Context window **90%** full. Send `/compact` to free space."
+            elif usage_pct >= 75:
+                response += f"\n\n💡 Context usage: {usage_pct:.0f}%"
+            
             final_card = self._active_cards.get(key) or card_handle
             if final_card:
                 self._update_card(platform, final_card, response)
