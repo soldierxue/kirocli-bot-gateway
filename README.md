@@ -45,7 +45,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔌 Multi-Platform**: Single gateway serves multiple chat platforms
 - **🔒 Chat Isolation**: Each chat gets its own Kiro CLI instance for parallel inference
 - **📂 Multi-Project**: Switch between projects in the same chat with `/project` commands
-- **🧠 Persistent Memory**: User preferences, project context, and learned corrections survive across sessions and platforms
+- **🧠 Persistent Memory**: User preferences, project context, learned corrections, and daily conversation summaries survive across sessions and platforms — with automatic LLM-driven consolidation
 - **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🤖 Multi Feishu Bot**: Run multiple Feishu bots for parallel project work (one bot per project)
@@ -430,8 +430,9 @@ kirocli-bot-gateway/
 ├── config.py                      # Configuration management
 ├── acp_client.py                  # ACP protocol client
 ├── session_map.py                 # Session resume: chat_key → kiro-cli session ID
-├── memory.py                      # Two-layer persistent memory (prefs/lessons + projects)
+├── memory.py                      # Two-layer persistent memory (prefs/lessons/history + projects)
 ├── context.py                     # Context builder: injects memory into new sessions
+├── consolidator.py                # LLM-driven memory extraction from conversations
 ├── .env.example                   # Environment config template (copy to .env)
 ├── feishu_bots.example.json       # Multi Feishu bot config template (optional)
 ├── discord_policy.json            # Discord access policy (optional, overrides env vars)
@@ -451,12 +452,20 @@ kirocli-bot-gateway/
 ~/.kirocli-gateway/
 ├── session_map.json               # Chat key → kiro-cli session ID mapping
 └── memory/
-    ├── preferences.md             # Global user preferences
-    ├── lessons.md                 # Global learned corrections
+    ├── preferences.md             # Global user preferences (backed up as .bak)
+    ├── preferences.md.bak         # Previous version (auto-rotated on write)
+    ├── lessons.md                 # Global learned corrections (backed up as .bak)
+    ├── lessons.md.bak             # Previous version
+    ├── history/                   # Daily conversation summaries (3-level decay)
+    │   ├── 2026-04-21.md          # Today: full content
+    │   ├── 2026-04-20.md          # Yesterday: full content
+    │   └── ...                    # 4-30d: summarized, 31-90d: count only, 90d+: deleted
     └── workspaces/
         ├── _global/projects.md    # Project context (per_chat mode)
         └── {hash}/projects.md     # Project context (fixed mode, per project dir)
 ```
+
+**Memory consolidation**: After 15+ messages and 60s of idle time, the gateway automatically analyzes the conversation using kiro-cli's LLM to extract preferences, project context, lessons, and a daily summary — no manual `/remember` needed. Memory files are backed up (`.bak`) before each LLM-driven update.
 
 ## Multi-Project Sessions
 

@@ -43,7 +43,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔌 多平台支持**：一个网关服务多个聊天平台
 - **🔒 聊天隔离**：每个聊天独立的 Kiro CLI 实例，并行推理
 - **📂 多项目支持**：在同一聊天中通过 `/project` 命令切换项目
-- **🧠 持久记忆**：用户偏好、项目上下文和纠正规则跨会话、跨平台保留
+- **🧠 持久记忆**：用户偏好、项目上下文、纠正规则和每日对话摘要跨会话、跨平台保留——支持 LLM 自动整合
 - **🔄 会话恢复**：空闲超时、崩溃或网关重启后自动恢复对话历史
 - **📁 灵活的工作空间模式**：`per_chat`（用户隔离）或 `fixed`（共享项目）
 - **🤖 多飞书机器人**：运行多个飞书机器人实现并行项目工作（每个机器人对应一个项目）
@@ -428,8 +428,9 @@ kirocli-bot-gateway/
 ├── config.py                      # 配置管理
 ├── acp_client.py                  # ACP 协议客户端
 ├── session_map.py                 # 会话恢复：chat_key → kiro-cli session ID
-├── memory.py                      # 两层持久记忆（偏好/教训 + 项目上下文）
+├── memory.py                      # 两层持久记忆（偏好/教训/历史 + 项目上下文）
 ├── context.py                     # 上下文构建器：新会话注入记忆
+├── consolidator.py                # LLM 驱动的对话记忆提取
 ├── .env.example                   # 环境配置模板（复制为 .env）
 ├── feishu_bots.example.json       # 多飞书机器人配置模板（可选）
 ├── discord_policy.json            # Discord 访问策略（可选，覆盖环境变量）
@@ -449,12 +450,20 @@ kirocli-bot-gateway/
 ~/.kirocli-gateway/
 ├── session_map.json               # 聊天 key → kiro-cli session ID 映射
 └── memory/
-    ├── preferences.md             # 全局用户偏好
-    ├── lessons.md                 # 全局教训
+    ├── preferences.md             # 全局用户偏好（写入前自动备份为 .bak）
+    ├── preferences.md.bak         # 上一个版本（写入时自动轮转）
+    ├── lessons.md                 # 全局教训（写入前自动备份为 .bak）
+    ├── lessons.md.bak             # 上一个版本
+    ├── history/                   # 每日对话摘要（3 级衰减）
+    │   ├── 2026-04-21.md          # 今天：完整内容
+    │   ├── 2026-04-20.md          # 昨天：完整内容
+    │   └── ...                    # 4-30 天：摘要，31-90 天：仅计数，90 天+：删除
     └── workspaces/
         ├── _global/projects.md    # 项目上下文（per_chat 模式）
         └── {hash}/projects.md     # 项目上下文（fixed 模式，按项目目录隔离）
 ```
+
+**记忆整合**：累积 15 条以上消息且空闲 60 秒后，网关自动使用 kiro-cli 的 LLM 分析对话，提取偏好、项目上下文、教训和每日摘要——无需手动 `/remember`。记忆文件在每次 LLM 更新前自动备份（`.bak`）。
 
 ## 多项目会话
 
