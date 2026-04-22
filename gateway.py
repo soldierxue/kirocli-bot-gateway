@@ -1807,6 +1807,15 @@ class Gateway:
         session_id, modes = acp.session_new(work_dir)
         log.info("[Gateway] [%s] Created session %s (cwd: %s)", key, session_id, work_dir)
 
+        # Set default model
+        default_model = self._config.kiro.default_model
+        if default_model:
+            try:
+                acp.session_set_model(session_id, default_model)
+                log.info("[Gateway] [%s] Set model: %s", key, default_model)
+            except Exception:
+                log.debug("[Gateway] [%s] Failed to set model %s", key, default_model)
+
         with self._contexts_lock:
             self._contexts[key] = ChatContext(
                 chat_id=chat_id,

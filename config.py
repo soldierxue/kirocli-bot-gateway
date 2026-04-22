@@ -218,6 +218,7 @@ class DiscordConfig:
 class KiroConfig:
     """Kiro CLI configuration."""
     path: str = "kiro"
+    default_model: str = "claude-opus-4.6"  # Default model for new sessions
     default_cwd: str = ""  # Default working directory if platform doesn't specify
     idle_timeout: int = 300  # seconds
     workspace_mode: str = "per_chat"  # Global default: "fixed" or "per_chat"
@@ -442,6 +443,7 @@ def load_config() -> Config:
 
     kiro = KiroConfig(
         path=os.getenv("KIRO_PATH", "kiro-cli"),
+        default_model=os.getenv("KIRO_DEFAULT_MODEL", "claude-opus-4.6"),
         default_cwd=os.getenv("KIRO_CWD", os.getcwd()),
         idle_timeout=int(os.getenv("KIRO_IDLE_TIMEOUT", "300")),
         workspace_mode=_parse_workspace_mode(os.getenv("KIRO_WORKSPACE_MODE"), "per_chat"),
