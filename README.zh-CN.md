@@ -47,6 +47,8 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔄 会话恢复**：空闲超时、崩溃或网关重启后自动恢复对话历史
 - **📁 灵活的工作空间模式**：`per_chat`（用户隔离）或 `fixed`（共享项目）
 - **🤖 多飞书机器人**：运行多个飞书机器人实现并行项目工作（每个机器人对应一个项目）
+- **⏰ 定时任务**：通过 `/cron add` 调度周期性任务——由后台 Kiro CLI 执行
+- **📋 任务编排**：将复杂任务分解为步骤并行执行（`/task run`）
 - **📏 上下文监控**：自动上下文使用率预警（75%/90%），支持 `/compact` 压缩
 - **🔐 交互式权限审批**：敏感操作需用户确认（y/n/t）
 - **⚡ 按需启动**：仅在收到消息时启动 Kiro CLI
@@ -372,6 +374,26 @@ journalctl -u kiro-gateway -f
 | `/memory` | 显示当前记忆内容 |
 | `/help` | 显示帮助 |
 
+**定时任务**（后台周期执行）：
+
+| 命令 | 说明 |
+|------|------|
+| `/cron add "名称" "消息" --every 3600` | 添加周期性任务 |
+| `/cron list` | 列出所有定时任务 |
+| `/cron pause <id>` | 暂停任务 |
+| `/cron resume <id>` | 恢复任务 |
+| `/cron remove <id>` | 删除任务 |
+
+**任务编排**（多步骤任务执行）：
+
+| 命令 | 说明 |
+|------|------|
+| `/task run <描述>` | 分解任务为步骤，展示计划，确认后执行 |
+| `/task status` | 查看当前任务进度 |
+| `/task cancel` | 取消当前任务 |
+
+`/task run` 后机器人会展示带并行分组的执行计划。回复 **go** 开始执行。
+
 **Kiro CLI 命令**（转发给 kiro-cli 执行）：
 
 | 命令 | 说明 |
@@ -431,6 +453,8 @@ kirocli-bot-gateway/
 ├── memory.py                      # 两层持久记忆（偏好/教训/历史 + 项目上下文）
 ├── context.py                     # 上下文构建器：新会话注入记忆
 ├── consolidator.py                # LLM 驱动的对话记忆提取
+├── cron.py                        # 定时任务调度服务
+├── task_runner.py                 # 任务编排：多步骤分解与并行执行
 ├── .env.example                   # 环境配置模板（复制为 .env）
 ├── feishu_bots.example.json       # 多飞书机器人配置模板（可选）
 ├── discord_policy.json            # Discord 访问策略（可选，覆盖环境变量）
@@ -449,6 +473,7 @@ kirocli-bot-gateway/
 ```
 ~/.kirocli-gateway/
 ├── session_map.json               # 聊天 key → kiro-cli session ID 映射
+├── crons.json                     # 定时任务配置
 └── memory/
     ├── preferences.md             # 全局用户偏好（写入前自动备份为 .bak）
     ├── preferences.md.bak         # 上一个版本（写入时自动轮转）

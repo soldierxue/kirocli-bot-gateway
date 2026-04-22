@@ -49,6 +49,8 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🤖 Multi Feishu Bot**: Run multiple Feishu bots for parallel project work (one bot per project)
+- **⏰ Cron Jobs**: Schedule periodic tasks (`/cron add`) — executed by a background Kiro CLI
+- **📋 Task Runner**: Decompose complex tasks into steps with parallel execution (`/task run`)
 - **📏 Context Monitoring**: Automatic context usage warnings (75%/90%) with `/compact` support
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
@@ -374,6 +376,26 @@ All commands work on both platforms, but the input method differs:
 | `/memory` | Show current memory contents |
 | `/help` | Show help |
 
+**Cron** (periodic background tasks):
+
+| Command | Description |
+|---------|-------------|
+| `/cron add "name" "message" --every 3600` | Schedule a periodic task |
+| `/cron list` | List all cron jobs |
+| `/cron pause <id>` | Pause a job |
+| `/cron resume <id>` | Resume a paused job |
+| `/cron remove <id>` | Remove a job |
+
+**Task** (multi-step task execution):
+
+| Command | Description |
+|---------|-------------|
+| `/task run <description>` | Decompose task into steps, show plan, then execute |
+| `/task status` | Show active task progress |
+| `/task cancel` | Cancel active task |
+
+After `/task run`, the bot shows a plan with parallel groups. Reply **go** to start execution.
+
 **Kiro CLI commands** (forwarded to kiro-cli for execution):
 
 | Command | Description |
@@ -433,6 +455,8 @@ kirocli-bot-gateway/
 ├── memory.py                      # Two-layer persistent memory (prefs/lessons/history + projects)
 ├── context.py                     # Context builder: injects memory into new sessions
 ├── consolidator.py                # LLM-driven memory extraction from conversations
+├── cron.py                        # Cron service: periodic task scheduling
+├── task_runner.py                 # Task runner: multi-step decomposition and parallel execution
 ├── .env.example                   # Environment config template (copy to .env)
 ├── feishu_bots.example.json       # Multi Feishu bot config template (optional)
 ├── discord_policy.json            # Discord access policy (optional, overrides env vars)
@@ -451,6 +475,7 @@ kirocli-bot-gateway/
 ```
 ~/.kirocli-gateway/
 ├── session_map.json               # Chat key → kiro-cli session ID mapping
+├── crons.json                     # Scheduled periodic tasks
 └── memory/
     ├── preferences.md             # Global user preferences (backed up as .bak)
     ├── preferences.md.bak         # Previous version (auto-rotated on write)
