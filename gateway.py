@@ -773,6 +773,15 @@ class Gateway:
             session_id = ctx.session_id if ctx else None
 
         acp = self._get_acp(platform, chat_id)
+        
+        # Auto-start session if needed (user may not have sent a message yet)
+        if not session_id and not acp:
+            try:
+                acp = self._ensure_acp(platform, chat_id)
+                session_id, _ = self._get_or_create_session(platform, chat_id, key, acp)
+            except Exception:
+                pass
+
         response = self._get_agent_response(acp, session_id, mode_arg)
         self._send_text_nowait(platform, chat_id, response)
 
@@ -783,6 +792,15 @@ class Gateway:
             session_id = ctx.session_id if ctx else None
 
         acp = self._get_acp(platform, chat_id)
+        
+        # Auto-start session if needed (user may not have sent a message yet)
+        if not session_id and not acp:
+            try:
+                acp = self._ensure_acp(platform, chat_id)
+                session_id, _ = self._get_or_create_session(platform, chat_id, key, acp)
+            except Exception:
+                pass
+
         response = self._get_model_response(acp, session_id, model_arg)
         self._send_text_nowait(platform, chat_id, response)
 
