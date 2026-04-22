@@ -20,8 +20,10 @@ from acp_client import ACPClient, PromptResult, PermissionRequest
 from config import Config
 from consolidator import MemoryConsolidator
 from context import ContextBuilder
+from cron import CronService
 from memory import MemoryStore
 from session_map import SessionMap
+from task_runner import TaskRunner, Task, TaskStep
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +144,26 @@ class Gateway:
         self._ctx_builder = ContextBuilder(memory=self._memory, config=config)
         self._consolidator = MemoryConsolidator(memory=self._memory)
         
+        # Background kiro-cli: persistent instance for consolidation, cron, tasks
+        self._bg_acp: ACPClient | None = None
+        self._bg_session_id: str | None = None
+        self._bg_lock = threading.Lock()
+        
+        # Cron service
+        self._cron = CronService(
+            state_dir=config.kiro.gateway_state_dir,
+            send_callback=lambda p, c, t: self._send_text_nowait(p, c, t),
+        )
+        
+        # Task runner
+        self._task_runner = TaskRunner(
+            cli_path=config.kiro.path,
+            default_cwd=config.kiro.default_cwd or os.getcwd(),
+            send_callback=lambda p, c, t: self._send_text_nowait(p, c, t),
+        )
+        # Pending task confirmation: key -> Task (waiting for "go")
+        self._pending_tasks: dict[str, Task] = {}
+        
         # Idle checker
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -155,6 +177,40 @@ class Gateway:
         base = self._make_key(platform, chat_id)
         return f"{base}@{project}" if project else base
 
+    # ── Background kiro-cli ──
+
+    def _start_background(self):
+        """Start the persistent background kiro-cli instance."""
+        log.info("[Gateway] Starting background kiro-cli...")
+        self._bg_acp = ACPClient(cli_path=self._config.kiro.path)
+        cwd = self._config.kiro.default_cwd or os.getcwd()
+        self._bg_acp.start(cwd=cwd)
+        self._bg_session_id, _ = self._bg_acp.session_new(cwd)
+        # Background tasks auto-approve (no interactive user)
+        log.info("[Gateway] Background kiro-cli ready (session=%s)", self._bg_session_id)
+
+    def _ensure_background(self):
+        """Ensure background kiro-cli is running, restart if dead."""
+        if self._bg_acp and self._bg_acp.is_running() and self._bg_session_id:
+            return
+        log.info("[Gateway] Background kiro-cli not running, restarting...")
+        if self._bg_acp:
+            try:
+                self._bg_acp.stop()
+            except Exception:
+                pass
+        self._start_background()
+
+    def _recycle_background(self):
+        """Recycle background kiro-cli if context usage is high."""
+        if not self._bg_acp or not self._bg_session_id:
+            return
+        usage = self._bg_acp.get_context_usage(self._bg_session_id)
+        if usage >= 70:
+            log.info("[Gateway] Recycling background kiro-cli (usage=%.0f%%)", usage)
+            self._bg_acp.stop()
+            self._start_background()
+
     def start(self):
         """Start the gateway and all adapters."""
         log.info("[Gateway] Starting with per-chat Kiro CLI instances (workspace_mode=%s, max=%d)", 
@@ -162,6 +218,23 @@ class Gateway:
 
         # Prune stale session map entries from previous runs
         self._session_map.prune()
+
+        # Start background kiro-cli for consolidation, cron, and tasks
+        try:
+            self._start_background()
+        except Exception:
+            log.warning("[Gateway] Background kiro-cli failed to start", exc_info=True)
+
+        # Wire cron execution to background kiro-cli
+        def _cron_execute(job):
+            self._ensure_background()
+            with self._bg_lock:
+                result = self._bg_acp.session_prompt(self._bg_session_id, job.message)
+            self._recycle_background()
+            from gateway import format_response
+            return format_response(result)
+        self._cron.execute_callback = _cron_execute
+        self._cron.start()
 
         # Start idle checker
         self._idle_checker_stop.clear()
@@ -172,12 +245,19 @@ class Gateway:
         def shutdown(sig, frame):
             log.info("[Gateway] Shutting down...")
             self._idle_checker_stop.set()
+            self._cron.stop()
             # Cancel all debounce timers
             with self._pending_lock:
                 for timer in self._debounce_timers.values():
                     timer.cancel()
                 self._debounce_timers.clear()
             self._stop_all_acp()
+            # Stop background kiro-cli
+            if self._bg_acp:
+                try:
+                    self._bg_acp.stop()
+                except Exception:
+                    pass
             for adapter in self._adapters:
                 adapter.stop()
             sys.exit(0)
@@ -375,13 +455,12 @@ class Gateway:
                 self._stop_acp_by_key(key)
 
     def _run_consolidation(self, effective_key: str):
-        """Run memory consolidation for a chat in a background thread.
+        """Run memory consolidation using the background kiro-cli.
         
         Reads recent conversation from kiro-cli's JSONL, sends a consolidation
-        prompt to kiro-cli, and writes extracted knowledge to memory files.
-        Notifies the user before and after.
+        prompt to the background kiro-cli, and writes extracted knowledge to memory.
         """
-        # Parse platform:chat_id from effective_key (may contain @project suffix)
+        # Parse platform:chat_id from effective_key
         base_key = effective_key.split("@")[0]
         parts = base_key.split(":", 1)
         if len(parts) != 2:
@@ -389,7 +468,7 @@ class Gateway:
             return
         platform, chat_id = parts
 
-        # Get session_id and ACP client
+        # Get session_id for reading conversation history
         with self._contexts_lock:
             ctx = self._contexts.get(effective_key) or self._contexts.get(base_key)
             session_id = ctx.session_id if ctx else None
@@ -399,12 +478,6 @@ class Gateway:
             self._consolidator.mark_done(effective_key)
             return
 
-        with self._acp_lock:
-            acp = self._acp_clients.get(effective_key)
-            if not acp or not acp.is_running():
-                self._consolidator.mark_done(effective_key)
-                return
-
         # Read recent conversation
         conversation = self._consolidator.read_recent_conversation(session_id)
         if not conversation:
@@ -412,16 +485,19 @@ class Gateway:
             self._consolidator.mark_done(effective_key)
             return
 
-        # Determine workspace_id for project-scoped memory
         ws_id = self._ctx_builder._workspace_id(platform, chat_id, active_project)
 
-        # Notify user that consolidation is starting
+        # Notify user
         self._send_text_nowait(platform, chat_id,
                                "🧠 Analyzing conversation to update memory...")
 
         try:
+            # Use background kiro-cli (not the user's chat kiro-cli)
+            self._ensure_background()
             prompt = self._consolidator.build_prompt(conversation, workspace_id=ws_id)
-            result = acp.session_prompt(session_id, prompt)
+            with self._bg_lock:
+                result = self._bg_acp.session_prompt(self._bg_session_id, prompt)
+            self._recycle_background()
 
             if result.text:
                 changed = self._consolidator.apply_result(result.text, workspace_id=ws_id)
@@ -572,6 +648,17 @@ class Gateway:
             self._handle_cancel(platform, chat_id, key)
             return
 
+        # Task confirmation ("go" to start a pending task)
+        if text_lower == "go" and key in self._pending_tasks:
+            task = self._pending_tasks.pop(key)
+            self._send_text_nowait(platform, chat_id, "🚀 Starting task...")
+            threading.Thread(
+                target=self._task_runner.run,
+                args=(task, self._bg_acp, self._bg_session_id),
+                daemon=True,
+            ).start()
+            return
+
         # Commands (/ prefix)
         if text.startswith("/"):
             self._handle_command(platform, chat_id, key, text)
@@ -669,6 +756,10 @@ class Gateway:
             self._handle_forget_command(platform, chat_id, arg)
         elif cmd == "/memory":
             self._handle_memory_command(platform, chat_id)
+        elif cmd == "/cron":
+            self._handle_cron_command(platform, chat_id, key, arg)
+        elif cmd == "/task":
+            self._handle_task_command(platform, chat_id, key, arg)
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
@@ -737,6 +828,159 @@ class Gateway:
                 self._send_text_nowait(platform, chat_id, f"{label}✓ Done")
         except Exception as e:
             self._send_text_nowait(platform, chat_id, f"❌ Command failed: {e}")
+
+    # ── Cron commands ──
+
+    def _handle_cron_command(self, platform: str, chat_id: str, key: str, arg: str):
+        """Route /cron subcommands."""
+        parts = arg.split(maxsplit=1) if arg else ["list"]
+        sub = parts[0].lower()
+        sub_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "list" or sub == "ls":
+            jobs = self._cron.list_jobs()
+            if not jobs:
+                self._send_text_nowait(platform, chat_id, "⏰ No cron jobs.\n💡 /cron add \"name\" \"message\" --every 3600")
+                return
+            lines = ["⏰ **Cron jobs:**\n"]
+            for j in jobs:
+                status = "⏸️" if j.paused else "🟢"
+                lines.append(f"  {status} `{j.id}` **{j.name}** — every {j.interval_secs}s")
+            self._send_text_nowait(platform, chat_id, "\n".join(lines))
+
+        elif sub == "add":
+            self._handle_cron_add(platform, chat_id, key, sub_arg)
+
+        elif sub == "remove" or sub == "rm":
+            if self._cron.remove(sub_arg):
+                self._send_text_nowait(platform, chat_id, f"✅ Removed cron job: {sub_arg}")
+            else:
+                self._send_text_nowait(platform, chat_id, f"❌ Job not found: {sub_arg}")
+
+        elif sub == "pause":
+            if self._cron.pause(sub_arg):
+                self._send_text_nowait(platform, chat_id, f"⏸️ Paused: {sub_arg}")
+            else:
+                self._send_text_nowait(platform, chat_id, f"❌ Job not found: {sub_arg}")
+
+        elif sub == "resume":
+            if self._cron.resume(sub_arg):
+                self._send_text_nowait(platform, chat_id, f"▶️ Resumed: {sub_arg}")
+            else:
+                self._send_text_nowait(platform, chat_id, f"❌ Job not found: {sub_arg}")
+
+        else:
+            self._send_text_nowait(platform, chat_id,
+                                   "💡 Usage: /cron add|list|remove|pause|resume")
+
+    def _handle_cron_add(self, platform: str, chat_id: str, key: str, arg: str):
+        """Parse /cron add 'name' 'message' --every N"""
+        import shlex
+        try:
+            tokens = shlex.split(arg)
+        except ValueError:
+            self._send_text_nowait(platform, chat_id,
+                                   '💡 Usage: /cron add "name" "message" --every 3600')
+            return
+
+        if len(tokens) < 2:
+            self._send_text_nowait(platform, chat_id,
+                                   '💡 Usage: /cron add "name" "message" --every 3600')
+            return
+
+        name = tokens[0]
+        message = tokens[1]
+        interval = 3600  # default 1 hour
+
+        for i, t in enumerate(tokens):
+            if t == "--every" and i + 1 < len(tokens):
+                try:
+                    interval = int(tokens[i + 1])
+                except ValueError:
+                    pass
+
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            project = ctx.active_project if ctx else ""
+
+        job = self._cron.add(name, message, interval, platform, chat_id, project=project)
+        self._send_text_nowait(platform, chat_id,
+                               f"✅ Cron job added: **{name}** (id: `{job.id}`, every {interval}s)")
+
+    # ── Task commands ──
+
+    def _handle_task_command(self, platform: str, chat_id: str, key: str, arg: str):
+        """Route /task subcommands."""
+        parts = arg.split(maxsplit=1) if arg else ["status"]
+        sub = parts[0].lower()
+        sub_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "run":
+            self._handle_task_run(platform, chat_id, key, sub_arg)
+        elif sub == "status":
+            task = self._task_runner.active_task
+            if task:
+                ok = sum(1 for s in task.steps if s.status == "ok")
+                self._send_text_nowait(platform, chat_id,
+                                       f"📋 Task: {task.description[:60]}\n"
+                                       f"  Status: {task.status}\n"
+                                       f"  Progress: {ok}/{len(task.steps)} steps")
+            else:
+                self._send_text_nowait(platform, chat_id, "📋 No active task")
+        elif sub == "cancel":
+            self._task_runner.cancel()
+            self._send_text_nowait(platform, chat_id, "⏹️ Task cancel requested")
+        else:
+            self._send_text_nowait(platform, chat_id,
+                                   "💡 Usage: /task run <description> | /task status | /task cancel")
+
+    def _handle_task_run(self, platform: str, chat_id: str, key: str, description: str):
+        """Handle /task run <description> — decompose and confirm."""
+        if not description:
+            self._send_text_nowait(platform, chat_id, "💡 Usage: /task run <task description>")
+            return
+
+        if self._task_runner.active_task:
+            self._send_text_nowait(platform, chat_id,
+                                   "❌ A task is already running. Use /task cancel first.")
+            return
+
+        self._send_text_nowait(platform, chat_id, "🤔 Decomposing task into steps...")
+
+        try:
+            self._ensure_background()
+            with self._bg_lock:
+                steps = self._task_runner.decompose(
+                    self._bg_acp, self._bg_session_id, description
+                )
+            self._recycle_background()
+        except Exception as e:
+            self._send_text_nowait(platform, chat_id, f"❌ Decomposition failed: {e}")
+            return
+
+        if not steps:
+            self._send_text_nowait(platform, chat_id, "❌ Failed to decompose task into steps")
+            return
+
+        with self._contexts_lock:
+            ctx = self._contexts.get(key)
+            project = ctx.active_project if ctx else ""
+
+        import uuid as _uuid
+        task = Task(
+            id=_uuid.uuid4().hex[:8],
+            description=description,
+            steps=steps,
+            status="waiting",
+            platform=platform,
+            chat_id=chat_id,
+            project=project,
+        )
+
+        # Show plan and wait for confirmation
+        plan_text = self._task_runner.format_plan(task)
+        self._send_text_nowait(platform, chat_id, plan_text)
+        self._pending_tasks[key] = task
 
     def _handle_remember_command(self, platform: str, chat_id: str, arg: str):
         """Handle /remember <text> — save a lesson to persistent memory."""
@@ -1066,6 +1310,18 @@ class Gateway:
 • /remember <text> - Save a preference or rule
 • /forget <keyword> - Remove matching memories
 • /memory - Show current memory
+
+**Cron:**
+• /cron add "name" "message" --every 3600 - Add periodic task
+• /cron list - List all cron jobs
+• /cron pause <id> - Pause a job
+• /cron resume <id> - Resume a job
+• /cron remove <id> - Remove a job
+
+**Task:**
+• /task run <description> - Decompose and run a multi-step task
+• /task status - Show active task progress
+• /task cancel - Cancel active task
 
 **Kiro CLI** (forwarded to kiro-cli):
 • /compact - Compress context window
