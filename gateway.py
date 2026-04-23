@@ -511,6 +511,7 @@ class Gateway:
             self._config.kiro.fallback_model = os.getenv("KIRO_FALLBACK_MODEL", "")
             self._config.kiro.auto_approve = os.getenv("KIRO_AUTO_APPROVE", "true").lower() in ("true", "1", "yes")
             self._config.kiro.default_model = os.getenv("KIRO_DEFAULT_MODEL", "claude-opus-4.6")
+            self._config.kiro.prompt_timeout = int(os.getenv("KIRO_PROMPT_TIMEOUT", "600"))
             self._config.debounce_discord = float(os.getenv("DEBOUNCE_DISCORD", "1.5"))
             self._config.debounce_feishu = float(os.getenv("DEBOUNCE_FEISHU", "1.0"))
             
@@ -837,6 +838,8 @@ class Gateway:
             self._handle_task_command(platform, chat_id, key, arg)
         elif cmd == "/cli":
             self._handle_cli_command(platform, chat_id, arg)
+        elif cmd == "/session":
+            self._handle_session_command(platform, chat_id, arg)
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
@@ -1001,6 +1004,33 @@ class Gateway:
         msg += f"  Chat instances stopped: {chat_count} (will cold-start on next message)\n"
         msg += f"  Background: {'🟢 restarted' if bg_ok else '🔴 failed'}"
         self._send_text_nowait(platform, chat_id, msg)
+
+    def _handle_session_command(self, platform: str, chat_id: str, arg: str):
+        """Handle /session commands for runtime configuration."""
+        parts = arg.strip().split(maxsplit=1) if arg else []
+        sub = parts[0].lower() if parts else ""
+        val = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "timeout" and val:
+            try:
+                secs = int(val)
+                if secs < 60:
+                    secs = secs * 60  # Treat small numbers as minutes
+                self._config.kiro.prompt_timeout = secs
+                self._send_text_nowait(platform, chat_id,
+                                       f"✅ Prompt timeout set to {secs}s ({secs // 60} min)")
+            except ValueError:
+                self._send_text_nowait(platform, chat_id, "❌ Invalid value. Usage: /session timeout 10")
+        elif sub == "timeout":
+            current = self._config.kiro.prompt_timeout
+            self._send_text_nowait(platform, chat_id,
+                                   f"⏱️ Current prompt timeout: {current}s ({current // 60} min)\n"
+                                   f"💡 /session timeout 15 (sets to 15 minutes)")
+        else:
+            self._send_text_nowait(platform, chat_id,
+                                   "💡 Usage:\n"
+                                   "• /session timeout — show current timeout\n"
+                                   "• /session timeout 10 — set to 10 minutes")
 
     def _handle_kiro_command(self, platform: str, chat_id: str, key: str, text: str):
         """Forward an unrecognized slash command to kiro-cli for execution.
@@ -1267,24 +1297,43 @@ class Gateway:
         """Build ordered lists of active and recent project paths for a chat.
 
         Returns (active_paths, recent_paths).
-        Active = kiro-cli running. Recent = session_map entry but kiro-cli stopped.
+        Active = kiro-cli running. Recent = session_map entry or known from contexts.
         """
         active: list[str] = []
         prefix = f"{key}@"
 
+        # Check running kiro-cli instances
         with self._acp_lock:
             for acp_key, acp in self._acp_clients.items():
                 if acp_key.startswith(prefix) and acp.is_running():
                     project_path = acp_key.split("@", 1)[1]
                     active.append(project_path)
 
+        # Also check _last_activity for recently-used project instances
+        with self._acp_lock:
+            for acp_key in self._last_activity:
+                if acp_key.startswith(prefix):
+                    project_path = acp_key.split("@", 1)[1]
+                    if project_path not in active:
+                        active.append(project_path)
+
         recent: list[str] = []
+        # Check session_map for resumable project sessions
         for map_key in list(self._session_map._data.keys()):
             if map_key.startswith(prefix):
                 project_path = map_key.split("@", 1)[1]
                 if project_path not in active:
                     if self._session_map.get(map_key) is not None:
                         recent.append(project_path)
+
+        # Also check _contexts for projects that were switched to but may not
+        # have an ACP entry yet (e.g. after gateway restart with active_project in memory)
+        with self._contexts_lock:
+            for ctx_key, ctx in self._contexts.items():
+                if ctx_key.startswith(key) and ctx.active_project:
+                    p = ctx.active_project
+                    if p not in active and p not in recent:
+                        active.append(p)
 
         return active, recent
 
@@ -1560,6 +1609,7 @@ class Gateway:
 • /clear - Clear conversation
 
 **Other:**
+• /session timeout [minutes] - View or set prompt timeout
 • /cli status - Show all kiro-cli instances and gateway status
 • /cli restart - Restart all kiro-cli instances
 • /help - Show this help"""
