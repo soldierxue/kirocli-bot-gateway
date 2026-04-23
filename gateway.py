@@ -381,8 +381,6 @@ class Gateway:
             acp.start(cwd=cwd)
             if not self._config.kiro.auto_approve:
                 acp.on_permission_request(lambda req, p=platform: self._handle_permission(req, p))
-            else:
-                log.info("[Gateway] [%s] Auto-approve enabled, skipping permission handler", key)
 
             with self._acp_lock:
                 self._acp_clients[key] = acp
