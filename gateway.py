@@ -509,6 +509,8 @@ class Gateway:
             
             self._config.kiro.idle_timeout = int(os.getenv("KIRO_IDLE_TIMEOUT", "300"))
             self._config.kiro.fallback_model = os.getenv("KIRO_FALLBACK_MODEL", "")
+            self._config.kiro.auto_approve = os.getenv("KIRO_AUTO_APPROVE", "true").lower() in ("true", "1", "yes")
+            self._config.kiro.default_model = os.getenv("KIRO_DEFAULT_MODEL", "claude-opus-4.6")
             self._config.debounce_discord = float(os.getenv("DEBOUNCE_DISCORD", "1.5"))
             self._config.debounce_feishu = float(os.getenv("DEBOUNCE_FEISHU", "1.0"))
             
