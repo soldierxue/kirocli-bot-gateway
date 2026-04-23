@@ -1894,7 +1894,9 @@ class Gateway:
             fallback_used = ""
             for attempt in range(max_retries):
                 try:
-                    result = acp.session_prompt(session_id, text, images=images, on_stream=stream_cb)
+                    result = acp.session_prompt(session_id, text, images=images,
+                                                on_stream=stream_cb,
+                                                timeout=self._config.kiro.prompt_timeout)
                     break
                 except RuntimeError as e:
                     last_error = e
@@ -1910,7 +1912,8 @@ class Gateway:
                         try:
                             acp.session_set_model(session_id, fallback)
                             result = acp.session_prompt(session_id, text, images=images,
-                                                        on_stream=stream_cb)
+                                                        on_stream=stream_cb,
+                                                        timeout=self._config.kiro.prompt_timeout)
                             fallback_used = fallback
                             break
                         except Exception:

@@ -321,7 +321,7 @@ class ACPClient:
             return "image/webp"
         return None
 
-    def session_prompt(self, session_id: str, text: str, images: list[tuple[str, str]] | None = None, timeout: float = 300, on_stream: Callable[[str, str], None] | None = None) -> PromptResult:
+    def session_prompt(self, session_id: str, text: str, images: list[tuple[str, str]] | None = None, timeout: float = 600, on_stream: Callable[[str, str], None] | None = None) -> PromptResult:
         """Send a prompt and collect the full response (blocking).
         
         Args:

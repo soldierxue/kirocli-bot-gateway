@@ -231,6 +231,7 @@ class KiroConfig:
     heartbeat_interval: int = 900  # Heartbeat interval in seconds (default: 15 min)
     heartbeat_target: str = ""  # Target chat for heartbeat (e.g. "feishu:oc_xxx")
     heartbeat_exclude: str = ""  # Quiet hours (e.g. "23:00-07:00/1-5")
+    prompt_timeout: int = 600  # Max seconds to wait for kiro-cli prompt response (default: 10 min)
 
 
 @dataclass
@@ -462,6 +463,7 @@ def load_config() -> Config:
         heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "900")),
         heartbeat_target=os.getenv("HEARTBEAT_TARGET", ""),
         heartbeat_exclude=os.getenv("HEARTBEAT_EXCLUDE", ""),
+        prompt_timeout=int(os.getenv("KIRO_PROMPT_TIMEOUT", "600")),
     )
 
     return Config(
