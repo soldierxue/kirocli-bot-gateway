@@ -908,23 +908,31 @@ class Gateway:
                 bg_usage = f" (ctx: {pct:.0f}%)"
         lines.append(f"**Background** (_bg): {bg_status}{bg_usage}")
 
-        # Per-chat instances
+        # Per-chat instances (from _acp_clients + _last_activity)
         with self._acp_lock:
-            chat_keys = sorted(self._acp_clients.keys())
-            running_count = sum(1 for a in self._acp_clients.values() if a.is_running())
+            chat_keys = sorted(set(list(self._acp_clients.keys()) + list(self._last_activity.keys())))
+            running_count = sum(1 for k in chat_keys
+                                if k in self._acp_clients and self._acp_clients[k].is_running())
+
+        # Also check session_map for resumable sessions not currently running
+        resumable_keys: list[str] = []
+        for map_key in list(self._session_map._data.keys()):
+            if map_key not in chat_keys:
+                resumable_keys.append(map_key)
 
         if chat_keys:
-            lines.append(f"\n**Chat instances** ({running_count} running, "
+            lines.append(f"\n**Chat instances** ({running_count} active, "
                          f"max {self._config.kiro.max_instances}):\n")
             for acp_key in chat_keys:
                 with self._acp_lock:
                     acp = self._acp_clients.get(acp_key)
                     last = self._last_activity.get(acp_key, 0)
 
-                if not acp:
-                    continue
+                if acp:
+                    status = "🟢" if acp.is_running() else "🔴"
+                else:
+                    status = "⚪"  # tracked but no ACP (recently cleaned up)
 
-                status = "🟢" if acp.is_running() else "🔴"
                 idle = time.time() - last if last else 0
 
                 # Get context usage and session info
@@ -932,7 +940,7 @@ class Gateway:
                 with self._contexts_lock:
                     ctx = self._contexts.get(acp_key)
                     sid = ctx.session_id if ctx else None
-                if sid:
+                if sid and acp:
                     pct = acp.get_context_usage(sid)
                     if pct > 0:
                         ctx_info = f" ctx:{pct:.0f}%"
@@ -946,6 +954,9 @@ class Gateway:
                 lines.append(f"  {status} `{display}` idle:{idle:.0f}s{ctx_info}")
         else:
             lines.append("\nNo chat instances running.")
+
+        if resumable_keys:
+            lines.append(f"\n💤 **Resumable** ({len(resumable_keys)} sessions in session_map)")
 
         # Cron jobs
         cron_jobs = self._cron.list_jobs()
