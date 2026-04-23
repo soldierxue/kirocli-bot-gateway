@@ -1920,6 +1920,26 @@ class Gateway:
                             log.warning("[Gateway] [%s] Transient error (attempt %d/%d): %s",
                                         platform, attempt + 1, max_retries, e)
                             time.sleep(1)
+                            # On last retry attempt, try resetting the session
+                            if attempt == max_retries - 2:
+                                log.info("[Gateway] [%s] Resetting session for final retry", key)
+                                try:
+                                    work_dir = active_project or self._config.get_session_cwd(platform, chat_id)
+                                    session_id, _ = acp.session_new(work_dir)
+                                    # Set model on new session
+                                    default_model = self._config.kiro.default_model
+                                    if default_model:
+                                        try:
+                                            acp.session_set_model(session_id, default_model)
+                                        except Exception:
+                                            pass
+                                    with self._contexts_lock:
+                                        ctx = self._contexts.get(effective_key)
+                                        if ctx:
+                                            ctx.session_id = session_id
+                                    self._session_to_key[session_id] = key
+                                except Exception:
+                                    pass
                             continue
                     raise
             else:
