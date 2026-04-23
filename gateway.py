@@ -761,7 +761,7 @@ class Gateway:
         elif cmd == "/task":
             self._handle_task_command(platform, chat_id, key, arg)
         elif cmd == "/cli":
-            self._handle_cli_status(platform, chat_id)
+            self._handle_cli_command(platform, chat_id, arg)
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
@@ -809,6 +809,16 @@ class Gateway:
     def _handle_help_command(self, platform: str, chat_id: str):
         """Show help."""
         self._send_text_nowait(platform, chat_id, self._get_help_text())
+
+    def _handle_cli_command(self, platform: str, chat_id: str, arg: str):
+        """Route /cli subcommands."""
+        sub = arg.strip().lower() if arg else "status"
+        if sub == "status":
+            self._handle_cli_status(platform, chat_id)
+        elif sub == "restart":
+            self._handle_cli_restart(platform, chat_id)
+        else:
+            self._send_text_nowait(platform, chat_id, "💡 Usage: /cli status | /cli restart")
 
     def _handle_cli_status(self, platform: str, chat_id: str):
         """Handle /cli status — show all active kiro-cli instances."""
@@ -878,6 +888,33 @@ class Gateway:
         lines.append(f"**Auto-approve**: {'✅ on' if self._config.kiro.auto_approve else '❌ off'}")
 
         self._send_text_nowait(platform, chat_id, "\n".join(lines))
+
+    def _handle_cli_restart(self, platform: str, chat_id: str):
+        """Handle /cli restart — stop and restart all kiro-cli instances."""
+        self._send_text_nowait(platform, chat_id, "🔄 Restarting all kiro-cli instances...")
+
+        # Count before
+        with self._acp_lock:
+            chat_count = sum(1 for a in self._acp_clients.values() if a.is_running())
+        has_bg = self._bg_acp and self._bg_acp.is_running()
+
+        # Stop all chat instances (session_map preserved for resume)
+        self._stop_all_acp()
+
+        # Restart background
+        try:
+            if self._bg_acp:
+                self._bg_acp.stop()
+            self._start_background()
+            bg_ok = True
+        except Exception as e:
+            log.warning("[Gateway] Background restart failed: %s", e)
+            bg_ok = False
+
+        msg = f"✅ Restart complete\n"
+        msg += f"  Chat instances stopped: {chat_count} (will cold-start on next message)\n"
+        msg += f"  Background: {'🟢 restarted' if bg_ok else '🔴 failed'}"
+        self._send_text_nowait(platform, chat_id, msg)
 
     def _handle_kiro_command(self, platform: str, chat_id: str, key: str, text: str):
         """Forward an unrecognized slash command to kiro-cli for execution.
@@ -1421,6 +1458,7 @@ class Gateway:
 
 **Other:**
 • /cli status - Show all kiro-cli instances and gateway status
+• /cli restart - Restart all kiro-cli instances
 • /help - Show this help"""
     
     def _get_agent_response(self, acp: ACPClient | None, session_id: str | None, args: str) -> str:
