@@ -61,6 +61,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
 - **📊 LRU Eviction**: Automatic cleanup when instance limit is reached
+- **🚦 Outbound Rate Limiting**: Per-platform send throttling (5 msg/sec) to prevent API bans
 - **🖼️ Image Support**: Send images for visual analysis (JPEG, PNG, GIF, WebP) with auto MIME detection
 - **🛑 Cancel Operation**: Send "cancel" to interrupt
 - **🔧 MCP & Skills Support**: Global or project-level configuration

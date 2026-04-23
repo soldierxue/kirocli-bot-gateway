@@ -59,6 +59,7 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **⚡ 按需启动**：仅在收到消息时启动 Kiro CLI
 - **⏱️ 空闲自动关闭**：可配置的空闲超时
 - **📊 LRU 驱逐**：达到实例上限时自动回收最久未使用的实例
+- **🚦 出站限流**：按平台限制发送频率（5 条/秒），防止 API 封禁
 - **🖼️ 图片支持**：发送图片进行视觉分析（JPEG、PNG、GIF、WebP），自动检测真实格式
 - **🛑 取消操作**：发送 "cancel" 中断当前操作
 - **🔧 MCP 和 Skills 支持**：全局或项目级配置
