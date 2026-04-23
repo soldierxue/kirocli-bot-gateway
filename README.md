@@ -408,6 +408,13 @@ After `/task run`, the bot shows a plan with parallel groups. Reply **go** to st
 
 Any unrecognized `/command` is automatically forwarded to kiro-cli. Context usage is monitored — you'll see a warning when the context window reaches 75% or 90%.
 
+**Gateway management:**
+
+| Command | Description |
+|---------|-------------|
+| `/cli status` | Show all kiro-cli instances, context usage, cron jobs, and active task |
+| `/cli restart` | Stop all kiro-cli instances and restart background (sessions resume on next message) |
+
 ### Other Commands
 
 | Command | Description |
