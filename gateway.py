@@ -30,6 +30,29 @@ log = logging.getLogger(__name__)
 # Permission request timeout (seconds)
 _PERMISSION_TIMEOUT = 60
 
+# Default outbound rate limit (messages per second per platform)
+_DEFAULT_RATE_LIMIT = 5.0
+
+
+class _RateLimiter:
+    """Simple token bucket rate limiter for outbound messages."""
+
+    def __init__(self, max_per_sec: float = _DEFAULT_RATE_LIMIT):
+        self._interval = 1.0 / max_per_sec if max_per_sec > 0 else 0
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self):
+        """Block until the next send is allowed."""
+        if self._interval <= 0:
+            return
+        with self._lock:
+            now = time.time()
+            wait_time = self._last + self._interval - now
+            if wait_time > 0:
+                time.sleep(wait_time)
+            self._last = time.time()
+
 
 def format_response(result: PromptResult) -> str:
     """Format Kiro's response with tool call info."""
@@ -93,6 +116,11 @@ class Gateway:
         self._config = config
         self._adapters = adapters
         self._adapter_map: dict[str, ChatAdapter] = {a.platform_name: a for a in adapters}
+        
+        # Per-platform outbound rate limiters
+        self._rate_limiters: dict[str, _RateLimiter] = {}
+        for a in adapters:
+            self._rate_limiters[a.platform_name] = _RateLimiter()
         
         # Per-chat ACP clients: "platform:chat_id" -> ACPClient
         self._acp_clients: dict[str, ACPClient] = {}
@@ -158,6 +186,7 @@ class Gateway:
             heartbeat_target=config.kiro.heartbeat_target,
             heartbeat_exclude=config.kiro.heartbeat_exclude,
         )
+        self._cron._bg_busy_check = lambda: self._bg_lock.locked()
         
         # Task runner
         self._task_runner = TaskRunner(
@@ -553,19 +582,28 @@ class Gateway:
         """Get adapter by platform name."""
         return self._adapter_map.get(platform)
 
+    def _rate_limit(self, platform: str):
+        """Wait for outbound rate limit before sending."""
+        limiter = self._rate_limiters.get(platform)
+        if not limiter:
+            # Try base platform name (e.g. "feishu" from "feishu:app")
+            base = platform.split(":")[0] if ":" in platform else platform
+            limiter = self._rate_limiters.get(base)
+        if limiter:
+            limiter.wait()
+
     def _send_text(self, platform: str, chat_id: str, text: str, reply_to: str = ""):
         """Send text message via appropriate adapter."""
         adapter = self._get_adapter(platform)
         if adapter:
+            self._rate_limit(platform)
             adapter.send_text(chat_id, text, reply_to=reply_to)
 
     def _send_text_nowait(self, platform: str, chat_id: str, text: str):
-        """Send text message without blocking (for command responses).
-        
-        Falls back to send_text if adapter doesn't support nowait.
-        """
+        """Send text message without blocking (for command responses)."""
         adapter = self._get_adapter(platform)
         if adapter:
+            self._rate_limit(platform)
             if hasattr(adapter, 'send_text_nowait'):
                 adapter.send_text_nowait(chat_id, text)
             else:
@@ -575,6 +613,7 @@ class Gateway:
         """Send card via appropriate adapter."""
         adapter = self._get_adapter(platform)
         if adapter:
+            self._rate_limit(platform)
             return adapter.send_card(chat_id, content, title, reply_to=reply_to)
         return None
 
@@ -582,6 +621,7 @@ class Gateway:
         """Update card via appropriate adapter."""
         adapter = self._get_adapter(platform)
         if adapter:
+            self._rate_limit(platform)
             return adapter.update_card(handle, content, title)
         return False
 
@@ -1006,7 +1046,14 @@ class Gateway:
             lines = ["⏰ **Cron jobs:**\n"]
             for j in jobs:
                 status = "⏸️" if j.paused else "🟢"
-                lines.append(f"  {status} `{j.id}` **{j.name}** — every {j.interval_secs}s")
+                if j.schedule:
+                    from cron import cron_to_human
+                    sched = cron_to_human(j.schedule)
+                elif j.interval_secs:
+                    sched = f"每{j.interval_secs}秒"
+                else:
+                    sched = "未配置"
+                lines.append(f"  {status} `{j.id}` **{j.name}** — {sched}")
             self._send_text_nowait(platform, chat_id, "\n".join(lines))
 
         elif sub == "add":

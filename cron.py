@@ -75,6 +75,32 @@ def _field_matches(field: str, value: int, lo: int, hi: int) -> bool:
     return False
 
 
+def cron_to_human(expr: str) -> str:
+    """Convert 5-field cron expression to human-readable text."""
+    fields = expr.strip().split()
+    if len(fields) != 5:
+        return expr
+    minute, hour, dom, month, dow = fields
+
+    if expr.strip() == "* * * * *":
+        return "每分钟"
+    if minute.startswith("*/"):
+        return f"每{minute[2:]}分钟"
+    if hour.startswith("*/"):
+        return f"每{hour[2:]}小时"
+
+    if dom == "*" and month == "*":
+        dow_map = {
+            "1-5": "工作日", "0,6": "周末", "*": "每天",
+            "1": "周一", "2": "周二", "3": "周三",
+            "4": "周四", "5": "周五", "6": "周六", "0": "周日", "7": "周日",
+        }
+        day_str = dow_map.get(dow, f"周{dow}")
+        return f"{day_str} {hour.zfill(2)}:{minute.zfill(2)}"
+
+    return expr
+
+
 # ── Job file parsing ──
 
 def _parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -128,6 +154,8 @@ class CronService:
         self._hb_exclude = heartbeat_exclude
         self._last_heartbeat: float = 0.0
         self._last_job_scan: float = 0.0
+        # Callback to check if background kiro-cli is busy (set by gateway)
+        self._bg_busy_check: Callable[[], bool] | None = None
         self._load()
 
     def _load(self):
@@ -296,6 +324,10 @@ class CronService:
         if now - self._last_heartbeat < self._hb_interval:
             return
         if self._in_exclude_window():
+            return
+        # Skip if background kiro-cli is busy (consolidation or cron running)
+        if self._bg_busy_check and self._bg_busy_check():
+            log.debug("[Cron] Heartbeat skipped — background busy")
             return
         self._last_heartbeat = now
         try:
