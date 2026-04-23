@@ -49,9 +49,14 @@ Multi-platform bot gateway for Kiro CLI via ACP protocol.
 - **🔄 Session Resume**: Conversation history automatically restored after idle timeout, crash, or gateway restart
 - **📁 Flexible Workspace Modes**: `per_chat` (user isolation) or `fixed` (shared project)
 - **🤖 Multi Feishu Bot**: Run multiple Feishu bots for parallel project work (one bot per project)
-- **⏰ Cron Jobs**: Schedule periodic tasks (`/cron add`) — executed by a background Kiro CLI
+- **⏰ Cron Jobs**: Schedule periodic tasks with intervals or cron expressions (`/cron add`)
 - **📋 Task Runner**: Decompose complex tasks into steps with parallel execution (`/task run`)
+- **💓 Heartbeat**: Periodic background check-in with quiet hours support
 - **📏 Context Monitoring**: Automatic context usage warnings (75%/90%) with `/compact` support
+- **⚡ Fallback Model**: Auto-switch to backup model on rate limit or capacity errors
+- **🔄 Config Hot-Reload**: `.env` changes auto-detected every 30s (no restart needed)
+- **💬 Chat Style**: Concise, natural responses — no "Great question!" filler
+- **👋 First Session Bootstrap**: Guided introduction on first use, auto-saved to memory
 - **🔐 Interactive Permission Approval**: User approves sensitive operations (y/n/t)
 - **⚡ On-Demand Startup**: Kiro CLI starts only when needed
 - **⏱️ Auto Idle Shutdown**: Configurable idle timeout per chat
@@ -380,7 +385,8 @@ All commands work on both platforms, but the input method differs:
 
 | Command | Description |
 |---------|-------------|
-| `/cron add "name" "message" --every 3600` | Schedule a periodic task |
+| `/cron add "name" "message" --every 3600` | Schedule a periodic task (interval) |
+| `/cron add "name" "message" --schedule "0 9 * * 1-5"` | Schedule with cron expression |
 | `/cron list` | List all cron jobs |
 | `/cron pause <id>` | Pause a job |
 | `/cron resume <id>` | Resume a paused job |

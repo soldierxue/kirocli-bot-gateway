@@ -153,6 +153,10 @@ class Gateway:
         self._cron = CronService(
             state_dir=config.kiro.gateway_state_dir,
             send_callback=lambda p, c, t: self._send_text_nowait(p, c, t),
+            heartbeat_enabled=config.kiro.heartbeat_enabled,
+            heartbeat_interval=config.kiro.heartbeat_interval,
+            heartbeat_target=config.kiro.heartbeat_target,
+            heartbeat_exclude=config.kiro.heartbeat_exclude,
         )
         
         # Task runner
@@ -414,15 +418,28 @@ class Gateway:
         return None
 
     def _idle_checker_loop(self):
-        """Background thread for per-chat idle timeout and memory consolidation."""
+        """Background thread for per-chat idle timeout, memory consolidation, and config hot-reload."""
         idle_timeout = self._config.kiro.idle_timeout
         if idle_timeout <= 0:
             log.info("[Gateway] Idle timeout disabled")
             return
         
         _CONSOLIDATION_IDLE = 60  # seconds idle before triggering consolidation
+        _config_mtime: float = 0.0
         
         while not self._idle_checker_stop.wait(timeout=30):
+            # Config hot-reload: check .env mtime
+            try:
+                env_path = Path(".env")
+                if env_path.exists():
+                    mtime = env_path.stat().st_mtime
+                    if mtime > _config_mtime and _config_mtime > 0:
+                        self._hot_reload_config()
+                    _config_mtime = mtime
+            except Exception:
+                pass
+            
+            idle_timeout = self._config.kiro.idle_timeout  # May have been hot-reloaded
             keys_to_stop = []
             keys_to_consolidate = []
             
@@ -453,6 +470,24 @@ class Gateway:
             # Stop idle instances
             for key in keys_to_stop:
                 self._stop_acp_by_key(key)
+
+    def _hot_reload_config(self):
+        """Reload safe config values from .env without restarting."""
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(override=True)
+            
+            new_level = os.getenv("LOG_LEVEL", "INFO")
+            logging.getLogger().setLevel(getattr(logging, new_level.upper(), logging.INFO))
+            
+            self._config.kiro.idle_timeout = int(os.getenv("KIRO_IDLE_TIMEOUT", "300"))
+            self._config.kiro.fallback_model = os.getenv("KIRO_FALLBACK_MODEL", "")
+            self._config.debounce_discord = float(os.getenv("DEBOUNCE_DISCORD", "1.5"))
+            self._config.debounce_feishu = float(os.getenv("DEBOUNCE_FEISHU", "1.0"))
+            
+            log.info("[Gateway] Config hot-reloaded from .env")
+        except Exception as e:
+            log.warning("[Gateway] Config hot-reload failed: %s", e)
 
     def _run_consolidation(self, effective_key: str):
         """Run memory consolidation using the background kiro-cli.
@@ -1000,23 +1035,26 @@ class Gateway:
                                    "💡 Usage: /cron add|list|remove|pause|resume")
 
     def _handle_cron_add(self, platform: str, chat_id: str, key: str, arg: str):
-        """Parse /cron add 'name' 'message' --every N"""
+        """Parse /cron add 'name' 'message' --every N or --schedule '0 9 * * 1-5'"""
         import shlex
         try:
             tokens = shlex.split(arg)
         except ValueError:
             self._send_text_nowait(platform, chat_id,
-                                   '💡 Usage: /cron add "name" "message" --every 3600')
+                                   '💡 Usage: /cron add "name" "message" --every 3600\n'
+                                   '   or: /cron add "name" "message" --schedule "0 9 * * 1-5"')
             return
 
         if len(tokens) < 2:
             self._send_text_nowait(platform, chat_id,
-                                   '💡 Usage: /cron add "name" "message" --every 3600')
+                                   '💡 Usage: /cron add "name" "message" --every 3600\n'
+                                   '   or: /cron add "name" "message" --schedule "0 9 * * 1-5"')
             return
 
         name = tokens[0]
         message = tokens[1]
-        interval = 3600  # default 1 hour
+        interval = 0
+        schedule = ""
 
         for i, t in enumerate(tokens):
             if t == "--every" and i + 1 < len(tokens):
@@ -1024,14 +1062,21 @@ class Gateway:
                     interval = int(tokens[i + 1])
                 except ValueError:
                     pass
+            elif t == "--schedule" and i + 1 < len(tokens):
+                schedule = tokens[i + 1]
+
+        if not interval and not schedule:
+            interval = 3600  # default 1 hour
 
         with self._contexts_lock:
             ctx = self._contexts.get(key)
             project = ctx.active_project if ctx else ""
 
-        job = self._cron.add(name, message, interval, platform, chat_id, project=project)
+        job = self._cron.add(name, message, interval_secs=interval, schedule=schedule,
+                             platform=platform, chat_id=chat_id, project=project)
+        sched_info = f'schedule="{schedule}"' if schedule else f"every {interval}s"
         self._send_text_nowait(platform, chat_id,
-                               f"✅ Cron job added: **{name}** (id: `{job.id}`, every {interval}s)")
+                               f"✅ Cron job added: **{name}** (id: `{job.id}`, {sched_info})")
 
     # ── Task commands ──
 
@@ -1788,16 +1833,34 @@ class Gateway:
             stream_cb = _on_stream if card_handle else None
             max_retries = 3
             last_error: Exception | None = None
+            fallback_used = ""
             for attempt in range(max_retries):
                 try:
                     result = acp.session_prompt(session_id, text, images=images, on_stream=stream_cb)
                     break
                 except RuntimeError as e:
                     last_error = e
-                    error_str = str(e)
-                    if "ValidationException" in error_str or "Internal error" in error_str:
+                    error_str = str(e).lower()
+                    # Try fallback model on rate limit / capacity errors
+                    fallback = self._config.kiro.fallback_model
+                    if fallback and not fallback_used and (
+                        "rate limit" in error_str or "limit" in error_str
+                        or "timeout" in error_str or "capacity" in error_str
+                    ):
+                        log.info("[Gateway] [%s] Primary model failed, trying fallback: %s",
+                                 key, fallback)
+                        try:
+                            acp.session_set_model(session_id, fallback)
+                            result = acp.session_prompt(session_id, text, images=images,
+                                                        on_stream=stream_cb)
+                            fallback_used = fallback
+                            break
+                        except Exception:
+                            pass  # Fallback also failed, continue retry loop
+                    if "ValidationException" in str(e) or "Internal error" in str(e):
                         if attempt < max_retries - 1:
-                            log.warning("[Gateway] [%s] Transient error (attempt %d/%d): %s", platform, attempt + 1, max_retries, e)
+                            log.warning("[Gateway] [%s] Transient error (attempt %d/%d): %s",
+                                        platform, attempt + 1, max_retries, e)
                             time.sleep(1)
                             continue
                     raise
@@ -1809,6 +1872,9 @@ class Gateway:
                 self._last_activity[key] = time.time()
 
             response = format_response(result)
+            # Fallback model notice
+            if fallback_used:
+                response = f"⚡ _{fallback_used}_\n\n{response}"
             # Add project label so user knows which project responded
             if active_project:
                 project_name = os.path.basename(active_project)

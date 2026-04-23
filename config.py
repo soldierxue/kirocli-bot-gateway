@@ -219,6 +219,7 @@ class KiroConfig:
     """Kiro CLI configuration."""
     path: str = "kiro"
     default_model: str = "claude-opus-4.6"  # Default model for new sessions
+    fallback_model: str = ""  # Auto-switch on rate limit (e.g. "claude-sonnet-4.6")
     default_cwd: str = ""  # Default working directory if platform doesn't specify
     idle_timeout: int = 300  # seconds
     workspace_mode: str = "per_chat"  # Global default: "fixed" or "per_chat"
@@ -226,6 +227,10 @@ class KiroConfig:
     max_instances: int = 10  # Max concurrent kiro-cli instances (LRU eviction when exceeded)
     cold_start_limit: int = 4  # Max concurrent kiro-cli cold starts
     gateway_state_dir: str = ""  # Persistent state dir (default: ~/.kirocli-gateway)
+    heartbeat_enabled: bool = False  # Enable periodic heartbeat checks
+    heartbeat_interval: int = 900  # Heartbeat interval in seconds (default: 15 min)
+    heartbeat_target: str = ""  # Target chat for heartbeat (e.g. "feishu:oc_xxx")
+    heartbeat_exclude: str = ""  # Quiet hours (e.g. "23:00-07:00/1-5")
 
 
 @dataclass
@@ -444,6 +449,7 @@ def load_config() -> Config:
     kiro = KiroConfig(
         path=os.getenv("KIRO_PATH", "kiro-cli"),
         default_model=os.getenv("KIRO_DEFAULT_MODEL", "claude-opus-4.6"),
+        fallback_model=os.getenv("KIRO_FALLBACK_MODEL", ""),
         default_cwd=os.getenv("KIRO_CWD", os.getcwd()),
         idle_timeout=int(os.getenv("KIRO_IDLE_TIMEOUT", "300")),
         workspace_mode=_parse_workspace_mode(os.getenv("KIRO_WORKSPACE_MODE"), "per_chat"),
@@ -452,6 +458,10 @@ def load_config() -> Config:
         cold_start_limit=int(os.getenv("KIRO_COLD_START_LIMIT", "4")),
         gateway_state_dir=os.getenv("KIRO_GATEWAY_STATE_DIR",
                                     os.path.expanduser("~/.kirocli-gateway")),
+        heartbeat_enabled=os.getenv("HEARTBEAT_ENABLED", "false").lower() in ("true", "1", "yes"),
+        heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "900")),
+        heartbeat_target=os.getenv("HEARTBEAT_TARGET", ""),
+        heartbeat_exclude=os.getenv("HEARTBEAT_EXCLUDE", ""),
     )
 
     return Config(
