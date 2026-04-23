@@ -2067,9 +2067,19 @@ class Gateway:
         was created (no prior history). Resumed sessions return is_new=False.
         
         Resume flow: SessionMap lookup → session/load → fallback to session/new.
+        
+        For project sessions (key contains "@"), the project path is used as
+        work_dir so kiro-cli operates in the correct directory with the right
+        .kiro/ configuration.
         """
-        # Get working directory based on workspace_mode (fixed or per_chat)
-        work_dir = self._config.get_session_cwd(platform, chat_id)
+        # Determine working directory:
+        # - Project sessions: use the project path from the key (after "@")
+        # - Main sessions: use workspace_mode logic (get_session_cwd)
+        if "@" in key:
+            # Project key format: "platform:chat_id@/path/to/project"
+            work_dir = key.split("@", 1)[1]
+        else:
+            work_dir = self._config.get_session_cwd(platform, chat_id)
         os.makedirs(work_dir, exist_ok=True)
 
         # 1. In-memory session still alive → reuse
