@@ -222,6 +222,7 @@ class KiroConfig:
     fallback_model: str = ""  # Auto-switch on rate limit (e.g. "claude-sonnet-4.6")
     default_cwd: str = ""  # Default working directory if platform doesn't specify
     idle_timeout: int = 300  # seconds
+    project_idle_timeout: int = 600  # seconds — /project sessions default 10 min
     workspace_mode: str = "per_chat"  # Global default: "fixed" or "per_chat"
     auto_approve: bool = True  # Auto-approve all tool permission requests from Kiro (trust mode)
     max_instances: int = 10  # Max concurrent kiro-cli instances (LRU eviction when exceeded)
@@ -453,6 +454,7 @@ def load_config() -> Config:
         fallback_model=os.getenv("KIRO_FALLBACK_MODEL", ""),
         default_cwd=os.getenv("KIRO_CWD", os.getcwd()),
         idle_timeout=int(os.getenv("KIRO_IDLE_TIMEOUT", "300")),
+        project_idle_timeout=int(os.getenv("KIRO_PROJECT_IDLE_TIMEOUT", "600")),
         workspace_mode=_parse_workspace_mode(os.getenv("KIRO_WORKSPACE_MODE"), "per_chat"),
         auto_approve=os.getenv("KIRO_AUTO_APPROVE", "true").lower() in ("true", "1", "yes"),
         max_instances=int(os.getenv("KIRO_MAX_INSTANCES", "10")),

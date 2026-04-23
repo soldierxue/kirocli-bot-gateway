@@ -467,6 +467,7 @@ class Gateway:
                 pass
             
             idle_timeout = self._config.kiro.idle_timeout  # May have been hot-reloaded
+            project_idle_timeout = self._config.kiro.project_idle_timeout
             keys_to_stop = []
             keys_to_consolidate = []
             
@@ -478,8 +479,11 @@ class Gateway:
                     if not acp or not acp.is_running():
                         continue
                     
-                    if idle_time > idle_timeout:
-                        log.info("[Gateway] [%s] Idle timeout (%.0fs)", key, idle_time)
+                    # Project sessions (key contains "@") get a longer timeout
+                    effective_timeout = project_idle_timeout if "@" in key else idle_timeout
+                    
+                    if idle_time > effective_timeout:
+                        log.info("[Gateway] [%s] Idle timeout (%.0fs > %ds)", key, idle_time, effective_timeout)
                         keys_to_stop.append(key)
                     elif idle_time > _CONSOLIDATION_IDLE:
                         if self._consolidator.should_consolidate(key):
@@ -508,6 +512,7 @@ class Gateway:
             logging.getLogger().setLevel(getattr(logging, new_level.upper(), logging.INFO))
             
             self._config.kiro.idle_timeout = int(os.getenv("KIRO_IDLE_TIMEOUT", "300"))
+            self._config.kiro.project_idle_timeout = int(os.getenv("KIRO_PROJECT_IDLE_TIMEOUT", "600"))
             self._config.kiro.fallback_model = os.getenv("KIRO_FALLBACK_MODEL", "")
             self._config.kiro.auto_approve = os.getenv("KIRO_AUTO_APPROVE", "true").lower() in ("true", "1", "yes")
             self._config.kiro.default_model = os.getenv("KIRO_DEFAULT_MODEL", "claude-opus-4.6")
@@ -2033,6 +2038,8 @@ class Gateway:
             error_msg = str(e)
             if "cancelled" in error_msg.lower():
                 error_text = "⏹️ Operation cancelled"
+            elif "timed out" in error_msg.lower():
+                error_text = f"⏱️ Request timed out — kiro-cli may still be working. Send `cancel` to abort."
             else:
                 error_text = f"❌ Error: {e}"
             
@@ -2042,8 +2049,30 @@ class Gateway:
             else:
                 self._send_text(platform, chat_id, error_text)
             
-            with self._contexts_lock:
-                self._contexts.pop(key, None)
+            # On timeout: cancel the in-flight prompt so kiro-cli doesn't
+            # keep running the old task.  This prevents stale session state
+            # that causes permission re-prompts on the next message.
+            is_timeout = "timed out" in error_msg.lower()
+            if is_timeout:
+                try:
+                    with self._acp_lock:
+                        _acp = self._acp_clients.get(key)
+                    with self._contexts_lock:
+                        _ctx = self._contexts.get(key)
+                    if _acp and _ctx and _ctx.session_id:
+                        log.info("[Gateway] [%s] Cancelling timed-out prompt on session %s",
+                                 key, _ctx.session_id)
+                        _acp.session_cancel(_ctx.session_id)
+                except Exception as cancel_err:
+                    log.warning("[Gateway] [%s] Failed to cancel after timeout: %s",
+                                key, cancel_err)
+
+            # Only clear context for non-timeout errors.
+            # For timeouts the session is still valid after cancel — clearing
+            # it would force a session_load/new cycle that loses trust state.
+            if not is_timeout:
+                with self._contexts_lock:
+                    self._contexts.pop(key, None)
             
             # Check if this chat's ACP died
             with self._acp_lock:
