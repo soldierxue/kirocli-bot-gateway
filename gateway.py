@@ -760,6 +760,8 @@ class Gateway:
             self._handle_cron_command(platform, chat_id, key, arg)
         elif cmd == "/task":
             self._handle_task_command(platform, chat_id, key, arg)
+        elif cmd == "/cli":
+            self._handle_cli_status(platform, chat_id)
         elif cmd == "/help":
             self._handle_help_command(platform, chat_id)
         else:
@@ -807,6 +809,75 @@ class Gateway:
     def _handle_help_command(self, platform: str, chat_id: str):
         """Show help."""
         self._send_text_nowait(platform, chat_id, self._get_help_text())
+
+    def _handle_cli_status(self, platform: str, chat_id: str):
+        """Handle /cli status — show all active kiro-cli instances."""
+        lines = ["🖥️ **Kiro CLI Instances:**\n"]
+
+        # Background kiro-cli
+        bg_status = "🟢 running" if (self._bg_acp and self._bg_acp.is_running()) else "🔴 stopped"
+        bg_usage = ""
+        if self._bg_acp and self._bg_session_id:
+            pct = self._bg_acp.get_context_usage(self._bg_session_id)
+            if pct > 0:
+                bg_usage = f" (ctx: {pct:.0f}%)"
+        lines.append(f"**Background** (_bg): {bg_status}{bg_usage}")
+
+        # Per-chat instances
+        with self._acp_lock:
+            chat_keys = sorted(self._acp_clients.keys())
+            running_count = sum(1 for a in self._acp_clients.values() if a.is_running())
+
+        if chat_keys:
+            lines.append(f"\n**Chat instances** ({running_count} running, "
+                         f"max {self._config.kiro.max_instances}):\n")
+            for acp_key in chat_keys:
+                with self._acp_lock:
+                    acp = self._acp_clients.get(acp_key)
+                    last = self._last_activity.get(acp_key, 0)
+
+                if not acp:
+                    continue
+
+                status = "🟢" if acp.is_running() else "🔴"
+                idle = time.time() - last if last else 0
+
+                # Get context usage and session info
+                ctx_info = ""
+                with self._contexts_lock:
+                    ctx = self._contexts.get(acp_key)
+                    sid = ctx.session_id if ctx else None
+                if sid:
+                    pct = acp.get_context_usage(sid)
+                    if pct > 0:
+                        ctx_info = f" ctx:{pct:.0f}%"
+
+                # Format key for display
+                display = acp_key
+                if "@" in display:
+                    base, proj = display.split("@", 1)
+                    display = f"{base} → 📂 {os.path.basename(proj)}"
+
+                lines.append(f"  {status} `{display}` idle:{idle:.0f}s{ctx_info}")
+        else:
+            lines.append("\nNo chat instances running.")
+
+        # Cron jobs
+        cron_jobs = self._cron.list_jobs()
+        if cron_jobs:
+            active = sum(1 for j in cron_jobs if not j.paused)
+            lines.append(f"\n**Cron jobs**: {active} active / {len(cron_jobs)} total")
+
+        # Active task
+        task = self._task_runner.active_task
+        if task:
+            ok = sum(1 for s in task.steps if s.status == "ok")
+            lines.append(f"\n**Task**: {task.description[:50]}... ({ok}/{len(task.steps)} steps)")
+
+        lines.append(f"\n**Model**: {self._config.kiro.default_model}")
+        lines.append(f"**Auto-approve**: {'✅ on' if self._config.kiro.auto_approve else '❌ off'}")
+
+        self._send_text_nowait(platform, chat_id, "\n".join(lines))
 
     def _handle_kiro_command(self, platform: str, chat_id: str, key: str, text: str):
         """Forward an unrecognized slash command to kiro-cli for execution.
@@ -1349,6 +1420,7 @@ class Gateway:
 • /clear - Clear conversation
 
 **Other:**
+• /cli status - Show all kiro-cli instances and gateway status
 • /help - Show this help"""
     
     def _get_agent_response(self, acp: ACPClient | None, session_id: str | None, args: str) -> str:

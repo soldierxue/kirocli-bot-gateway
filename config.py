@@ -222,7 +222,7 @@ class KiroConfig:
     default_cwd: str = ""  # Default working directory if platform doesn't specify
     idle_timeout: int = 300  # seconds
     workspace_mode: str = "per_chat"  # Global default: "fixed" or "per_chat"
-    auto_approve: bool = False  # Auto-approve all permission requests from Kiro
+    auto_approve: bool = True  # Auto-approve all tool permission requests from Kiro (trust mode)
     max_instances: int = 10  # Max concurrent kiro-cli instances (LRU eviction when exceeded)
     cold_start_limit: int = 4  # Max concurrent kiro-cli cold starts
     gateway_state_dir: str = ""  # Persistent state dir (default: ~/.kirocli-gateway)
@@ -447,7 +447,7 @@ def load_config() -> Config:
         default_cwd=os.getenv("KIRO_CWD", os.getcwd()),
         idle_timeout=int(os.getenv("KIRO_IDLE_TIMEOUT", "300")),
         workspace_mode=_parse_workspace_mode(os.getenv("KIRO_WORKSPACE_MODE"), "per_chat"),
-        auto_approve=os.getenv("KIRO_AUTO_APPROVE", "false").lower() in ("true", "1", "yes"),
+        auto_approve=os.getenv("KIRO_AUTO_APPROVE", "true").lower() in ("true", "1", "yes"),
         max_instances=int(os.getenv("KIRO_MAX_INSTANCES", "10")),
         cold_start_limit=int(os.getenv("KIRO_COLD_START_LIMIT", "4")),
         gateway_state_dir=os.getenv("KIRO_GATEWAY_STATE_DIR",
